@@ -73,3 +73,5 @@ tmp/
 # ──────────────────────────────────────────────
 next-env.d.ts
 tsconfig.tsbuildinfo
+# test harness bundles
+.check/

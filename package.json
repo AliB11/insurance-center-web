@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run check:logic && npm run check:ui",
+    "check:logic": "esbuild checks/logic-check.tsx --bundle --format=cjs --platform=node --packages=external --outfile=.check/logic.cjs --log-level=warning && node .check/logic.cjs",
+    "check:ui": "esbuild checks/ui-check.tsx --bundle --format=cjs --platform=node --packages=external --outfile=.check/ui.cjs --log-level=warning && node .check/ui.cjs"
   },
   "dependencies": {
     "clsx": "2.1.1",
@@ -24,6 +28,8 @@
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.3.2",
-    "vite-plugin-singlefile": "2.3.0"
+    "vite-plugin-singlefile": "2.3.0",
+    "jsdom": "^30.1.2",
+    "esbuild": "^0.27.7"
   }
 }
