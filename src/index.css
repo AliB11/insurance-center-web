@@ -1,13 +1,82 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------ *
+ *  Design tokens – «مراکز طرف قرارداد بیمه بانک سپه»
+ *  ink  = deep navy (سرمه‌ای)   gold = saffron accent (طلایی)
+ * ------------------------------------------------------------------ */
+@theme {
+  --color-ink-50: #eef4fb;
+  --color-ink-100: #d7e5f4;
+  --color-ink-200: #adc7e6;
+  --color-ink-300: #7ba3d1;
+  --color-ink-400: #4d7db4;
+  --color-ink-500: #2f5d94;
+  --color-ink-600: #1f4676;
+  --color-ink-700: #163459;
+  --color-ink-800: #0f2440;
+  --color-ink-900: #0a1a30;
+  --color-ink-950: #050f1e;
+
+  --color-gold-50: #fff9ea;
+  --color-gold-100: #ffefc4;
+  --color-gold-200: #ffdf8a;
+  --color-gold-300: #fdc84d;
+  --color-gold-400: #f7b124;
+  --color-gold-500: #e2930b;
+  --color-gold-600: #bb6f06;
+  --color-gold-700: #94500a;
+
+  --color-mist: #f2f5fa;
+
+  --animate-rise: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-fade: fade 0.35s ease-out both;
+  --animate-drift: drift 18s ease-in-out infinite;
+  --animate-drift-slow: drift 26s ease-in-out infinite reverse;
+  --animate-slide-down: slideDown 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-pop: pop 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  --animate-shimmer: shimmer 1.4s linear infinite;
+  --animate-toast: toastIn 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(3%, -5%, 0) scale(1.12); }
+}
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-100%); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes pop {
+  from { opacity: 0; transform: scale(0.96) translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translate(-50%, 18px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 html {
   scroll-behavior: smooth;
 }
 
 body {
   font-family: "Vazirmatn", "Vazir", Tahoma, "Segoe UI", system-ui, sans-serif;
-  background: #f8fafc;
+  background: var(--color-mist);
+  color: var(--color-ink-900);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button,
@@ -28,11 +97,54 @@ details > summary::-webkit-details-marker {
   display: none;
 }
 
+/* thin, unobtrusive scrollbars for the horizontal rails */
+.rail {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.rail::-webkit-scrollbar {
+  display: none;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #e8edf5 25%, #f5f8fc 37%, #e8edf5 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* keyboard focus is always visible, mouse clicks stay clean */
+:focus-visible {
+  outline: 2px solid var(--color-gold-400);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--color-gold-200);
+  color: var(--color-ink-900);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
 @media print {
   .no-print {
     display: none !important;
   }
   body {
     background: #fff;
+  }
+  .print-plain {
+    box-shadow: none !important;
+    border: 1px solid #ddd !important;
   }
 }

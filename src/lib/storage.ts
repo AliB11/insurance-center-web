@@ -2,7 +2,7 @@ import type { Center, SheetReport } from './parser';
 
 export interface Meta {
   fileName: string;
-  source: 'local' | 'upload' | 'remote';
+  source: 'local' | 'upload' | 'remote' | 'demo';
   loadedAt: number;
   size: number;
 }
@@ -70,7 +70,12 @@ export async function clearStored(): Promise<void> {
 export function loadList<T>(key: string, fallback: T): T {
   try {
     const v = localStorage.getItem(key);
-    return v ? (JSON.parse(v) as T) : fallback;
+    if (!v) return fallback;
+    const parsed: unknown = JSON.parse(v);
+    // مقادیر دست‌کاری‌شده یا قدیمی نباید برنامه را بشکنند
+    if (Array.isArray(fallback) && !Array.isArray(parsed)) return fallback;
+    if (parsed === null || typeof parsed !== typeof fallback) return fallback;
+    return parsed as T;
   } catch {
     return fallback;
   }
