@@ -57,9 +57,11 @@ export function parsePhones(raw: string): Phone[] {
   const out: Phone[] = [];
   for (const p of parts) {
     let digits = p.replace(/\D/g, '');
-    if (digits.length < 5) continue;
+    if (digits.length < 5 || digits.length > 15) continue;
+    if (p.trim().startsWith('+')) digits = '+' + digits;
+    else if (digits.startsWith('0098')) digits = '+98' + digits.slice(4);
     if (digits.length === 10 && digits[0] !== '0') digits = '0' + digits;
-    out.push({ label: p, tel: digits });
+    if (!out.some((phone) => phone.tel === digits)) out.push({ label: p, tel: digits });
   }
   return out;
 }

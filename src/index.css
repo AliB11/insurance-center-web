@@ -148,3 +148,9 @@ details > summary::-webkit-details-marker {
     border: 1px solid #ddd !important;
   }
 }
+
+@media print {
+  article { break-inside: avoid; animation: none !important; }
+  article button, article > div:last-child { display: none !important; }
+  thead { position: static !important; }
+}

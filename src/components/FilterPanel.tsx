@@ -114,7 +114,7 @@ export function FilterPanel({ filters, catFacet, provFacet, cityFacet, kindFacet
       <SelectField label="دسته / نوع مرکز" icon="layers" value={filters.category} onChange={(v) => onPatch({ category: v })} options={catFacet} />
       <SelectField
         label="استان"
-        icon="map"
+        icon="pin"
         value={filters.province}
         onChange={(v) => onPatch({ province: v, city: '' })}
         options={provFacet}

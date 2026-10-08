@@ -1,13 +1,16 @@
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { CenterCard } from './components/CenterCard';
+import { RoutingModal } from './components/RoutingModal';
+import { Modal } from './components/Modal';
 import { DetailModal } from './components/DetailModal';
 import { FilterPanel } from './components/FilterPanel';
 import { ImportModal } from './components/ImportModal';
-import { Highlight, Icon, Kbd, mapsUrl, Spinner, Wave } from './components/ui';
+import { Highlight, Icon, Kbd, Spinner, Wave } from './components/ui';
 import { DEMO_FILE_NAME, demoCenters } from './lib/demo';
 import { tryLocal, tryRemote } from './lib/loader';
-import { parseWorkbook, type Center, type SheetReport } from './lib/parser';
+import { MAX_FILE_BYTES, parseWorkbook, type Center, type SheetReport } from './lib/parser';
 import { applyFilters, categoryEmoji, countBy, EMPTY_FILTERS, relevance, tokensOf, type Filters } from './lib/search';
 import { catTheme } from './lib/theme';
 import { clearStored, loadList, loadStored, saveData, saveList, type Meta } from './lib/storage';
@@ -33,14 +36,17 @@ export default function App() {
 
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
   const [sort, setSort] = useState<Sort>('relevance');
+  const [printing, setPrinting] = useState(false);
   const [view, setView] = useState<'cards' | 'table'>('cards');
   const [limit, setLimit] = useState(24);
   const [showFilters, setShowFilters] = useState(false);
   const [showAllCats, setShowAllCats] = useState(false);
+  const [routing, setRouting] = useState<Center | null>(null);
+  const operation = useRef(false);
   const [detail, setDetail] = useState<Center | null>(null);
   const [toast, setToast] = useState('');
-  const [favKeys, setFavKeys] = useState<Set<string>>(() => new Set(loadList<string[]>('sepah-favs', [])));
-  const [recent, setRecent] = useState<string[]>(() => loadList<string[]>('sepah-recent', []));
+  const [favKeys, setFavKeys] = useState<Set<string>>(() => new Set(loadList('sepah-favs', [])));
+  const [recent, setRecent] = useState<string[]>(() => loadList('sepah-recent', []));
   const [showTop, setShowTop] = useState(false);
   const [compact, setCompact] = useState(false);
   const [barH, setBarH] = useState(64);
@@ -64,8 +70,8 @@ export default function App() {
     await new Promise((r) => setTimeout(r, 30));
     const res = parseWorkbook(buf);
     if (!res.centers.length) {
-      setStatus('هیچ مرکزی در فایل پیدا نشد. «گزارش بررسی اکسل» را ببینید.');
-      setReport(res.report);
+      const notes = res.report.flatMap((r) => r.notes).slice(0, 3).join(' ');
+      setStatus('هیچ مرکزی در فایل پیدا نشد؛ دادهٔ فعلی تغییر نکرد. ' + notes);
       return false;
     }
     const m: Meta = { fileName: name, source, loadedAt: Date.now(), size: buf.byteLength };
@@ -74,9 +80,10 @@ export default function App() {
     setMeta(m);
     setFilters(EMPTY_FILTERS);
     setStatus(`${fmtNum(res.centers.length)} مرکز بارگذاری شد.`);
-    await saveData({ centers: res.centers, report: res.report, meta: m });
+    const saved = await saveData({ centers: res.centers, report: res.report, meta: m });
+    flash(saved ? 'فایل با موفقیت بارگذاری و ذخیره شد' : 'فایل بارگذاری شد، اما ذخیرهٔ مرورگر ممکن نشد؛ پس از بستن صفحه باید دوباره بارگذاری شود.');
     return true;
-  }, []);
+  }, [flash]);
 
   /** دادهٔ نمونه فقط برای اینکه رابط کاربری بدون فایل اکسل هم قابل دیدن باشد */
   const useDemo = useCallback(() => {
@@ -93,28 +100,33 @@ export default function App() {
   // ---------- boot: فایل ذخیره‌شده → فایل همراه برنامه → دادهٔ نمونه ----------
   useEffect(() => {
     let alive = true;
+    const controller = new AbortController();
     (async () => {
-      const stored = await loadStored();
-      if (alive && stored?.centers.length && stored.meta?.source && stored.meta.source !== 'demo') {
-        setCenters(stored.centers);
-        setReport(stored.report);
-        setMeta(stored.meta);
-        setStatus(`${fmtNum(stored.centers.length)} مرکز از حافظهٔ مرورگر بازیابی شد.`);
-        setBooting(false);
-        return;
+      try {
+        const stored = await loadStored();
+        if (alive && stored?.centers.length && stored.meta?.source && stored.meta.source !== 'demo') {
+          setCenters(stored.centers);
+          setReport(stored.report);
+          setMeta(stored.meta);
+          setStatus(`${fmtNum(stored.centers.length)} مرکز از حافظهٔ مرورگر بازیابی شد.`);
+          setBooting(false);
+          return;
+        }
+        if (!alive) return;
+        setStatus('در حال جستجوی فایل داده در مسیر برنامه...');
+        const local = await tryLocal(controller.signal);
+        if (!alive) return;
+        if (local) {
+          const ok = await ingest(local.buf, local.name, 'local');
+          if (ok) { setBooting(false); return; }
+        }
+        useDemo();
+      } catch {
+        if (alive) { useDemo(); flash('فایل همراه برنامه قابل خواندن نبود؛ دادهٔ نمونه نمایش داده شد.'); }
       }
-      if (!alive) return;
-      setStatus('در حال جستجوی فایل داده در مسیر برنامه...');
-      const local = await tryLocal();
-      if (!alive) return;
-      if (local) {
-        const ok = await ingest(local.buf, local.name, 'local');
-        if (ok) { setBooting(false); return; }
-      }
-      useDemo();
     })();
-    return () => { alive = false; };
-  }, [ingest, useDemo]);
+    return () => { alive = false; controller.abort(); };
+  }, [ingest, useDemo, flash]);
 
   // ---------- ارتفاع نوار بالا (برای چسبندگی صحیح لایه‌ها) ----------
   useLayoutEffect(() => {
@@ -148,6 +160,7 @@ export default function App() {
   // ---------- میان‌برهای کیبورد ----------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector('[aria-modal="true"]')) return;
       const tag = (e.target as HTMLElement | null)?.tagName;
       const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
       if (e.key === '/' && !typing) {
@@ -164,44 +177,54 @@ export default function App() {
   }, [compact, showFilters]);
 
   const handleFile = async (f: File) => {
+    if (operation.current || booting) return;
+    operation.current = true;
     setBusy(true);
     try {
+      if (!/\.(xlsx|xls|xlsm|csv)$/i.test(f.name)) throw new Error('فرمت فایل باید اکسل یا CSV باشد');
+      if (!f.size || f.size > MAX_FILE_BYTES) throw new Error('فایل باید غیرخالی و حداکثر ۲۰ مگابایت باشد');
       const buf = await f.arrayBuffer();
       const ok = await ingest(buf, f.name, 'upload');
       if (ok) {
         setModal('report');
-        flash('فایل با موفقیت بارگذاری شد');
       }
     } catch (err) {
       setStatus('خطا در خواندن فایل: ' + (err as Error).message);
       flash('خواندن فایل ناموفق بود');
-    }
-    setBusy(false);
+    } finally { setBusy(false); operation.current = false; }
   };
 
   const handleRemote = async (url: string) => {
+    if (operation.current || booting) return;
+    operation.current = true;
     setBusy(true);
     setStatus('در حال اتصال...');
-    const r = await tryRemote(url.trim(), setStatus);
-    if (r) {
-      const ok = await ingest(r.buf, r.name, 'remote');
-      if (ok) {
-        setModal('report');
-        flash('فایل آنلاین دریافت شد');
+    try {
+      const r = await tryRemote(url.trim(), setStatus);
+      if (r) {
+        const ok = await ingest(r.buf, r.name, 'remote');
+        if (ok) setModal('report');
+      } else {
+        setStatus('دریافت آنلاین ناموفق بود (محدودیت CORS، شبکه یا فایل نامعتبر). فایل را دانلود و بارگذاری کنید.');
       }
-    } else {
-      setStatus('دریافت آنلاین ناموفق بود (احتمالاً محدودیت CORS یا فیلترینگ). فایل را دانلود و بارگذاری کنید.');
-    }
-    setBusy(false);
+    } catch (error) {
+      setStatus('خطا در دریافت فایل: ' + (error as Error).message);
+      flash('دریافت فایل ناموفق بود');
+    } finally { setBusy(false); operation.current = false; }
   };
 
   const handleReset = async () => {
-    await clearStored();
-    setCenters([]);
-    setReport([]);
-    setMeta(null);
-    setStatus('دادهٔ ذخیره‌شده حذف شد.');
-    flash('دادهٔ ذخیره‌شده حذف شد');
+    if (operation.current || booting) return;
+    operation.current = true;
+    setBusy(true);
+    try {
+      const cleared = await clearStored();
+      if (!cleared) { flash('حذف حافظهٔ مرورگر ممکن نشد؛ داده‌ها تغییری نکردند.'); return; }
+      setCenters([]); setReport([]); setMeta(null); setDetail(null); setRouting(null);
+      setFilters(EMPTY_FILTERS);
+      setStatus('دادهٔ ذخیره‌شده حذف شد.');
+      flash('دادهٔ ذخیره‌شده حذف شد');
+    } finally { setBusy(false); operation.current = false; }
   };
 
   // ---------- derived data ----------
@@ -222,7 +245,7 @@ export default function App() {
   }, [centers, dq, favIds, sort, tokens]);
 
   const catFacet = useMemo(() => countBy(applyFilters(centers, dq, favIds, 'category'), (c) => c.category), [centers, dq, favIds]);
-  const provFacet = useMemo(() => countBy(applyFilters(centers, dq, favIds, 'province'), (c) => c.province), [centers, dq, favIds]);
+  const provFacet = useMemo(() => countBy(applyFilters(centers, { ...dq, city: '' }, favIds, 'province'), (c) => c.province), [centers, dq, favIds]);
   const cityFacet = useMemo(() => countBy(applyFilters(centers, dq, favIds, 'city'), (c) => c.city), [centers, dq, favIds]);
   const kindFacet = useMemo(() => countBy(applyFilters(centers, dq, favIds, 'kind'), (c) => c.kind), [centers, dq, favIds]);
   const allCats = useMemo(() => countBy(centers, (c) => c.category).sort((a, b) => b[1] - a[1]), [centers]);
@@ -284,6 +307,8 @@ export default function App() {
       تلفن: c.phones.map((p) => p.label).join(' / '),
       'تخفیف/قرارداد': c.discount,
       توضیحات: c.desc,
+      latitude: c.coordinates?.lat ?? '',
+      longitude: c.coordinates?.lng ?? '',
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
@@ -299,7 +324,15 @@ export default function App() {
     (filters.favOnly ? 1 : 0);
   const hasData = centers.length > 0;
   const isDemo = meta?.source === 'demo';
-  const visible = results.slice(0, limit);
+  const visible = printing ? results : results.slice(0, limit);
+
+  useEffect(() => {
+    const before = () => flushSync(() => setPrinting(true));
+    const after = () => setPrinting(false);
+    window.addEventListener('beforeprint', before);
+    window.addEventListener('afterprint', after);
+    return () => { window.removeEventListener('beforeprint', before); window.removeEventListener('afterprint', after); };
+  }, []);
 
   const searchInput = (ref: React.RefObject<HTMLInputElement | null>, placeholder: string, onCommit: boolean) => (
     <form
@@ -336,6 +369,11 @@ export default function App() {
 
   return (
     <div dir="rtl" className="min-h-screen bg-mist text-ink-900">
+      <div className="hidden p-4 text-sm print:block">
+        مراکز طرف قرارداد بیمه بانک سپه — {fmtNum(results.length)} نتیجه
+        {isDemo ? " — دادهٔ نمونه؛ برای مراجعه معتبر نیست" : ` — منبع: ${meta?.fileName || "بدون داده"}`}
+      </div>
+
       {/* ======================= نوار بالای برنامه ======================= */}
       <header
         ref={headerRef}
@@ -769,6 +807,7 @@ export default function App() {
                         fav={favIds.has(c.id)}
                         onFav={toggleFav}
                         onOpen={setDetail}
+                        onRoute={setRouting}
                         onCopy={copy}
                       />
                     ))}
@@ -813,9 +852,9 @@ export default function App() {
                               ))}
                             </td>
                             <td className="px-3 py-3">
-                              <a href={mapsUrl(c)} target="_blank" rel="noreferrer" aria-label="نمایش روی نقشه" className="text-ink-600 transition hover:text-ink-950">
+                              <button onClick={() => setRouting(c)} aria-label="انتخاب مسیریاب" className="text-ink-600 transition hover:text-ink-950">
                                 <Icon name="pin" className="h-4 w-4" />
-                              </a>
+                              </button>
                             </td>
                           </tr>
                         ))}
@@ -900,19 +939,13 @@ export default function App() {
 
       {/* ---------- کشوی فیلتر موبایل ---------- */}
       {showFilters && (
-        <div className="no-print fixed inset-0 z-40 animate-fade lg:hidden" role="dialog" aria-modal="true" onClick={() => setShowFilters(false)}>
-          <div className="absolute inset-0 bg-ink-950/60 backdrop-blur-sm" />
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="absolute inset-x-0 bottom-0 max-h-[85vh] animate-rise overflow-y-auto rounded-t-3xl bg-white p-5 shadow-2xl"
-          >
+        <Modal onClose={() => setShowFilters(false)} sheet labelledBy="filter-title" maxWidth="max-w-xl">
+          <div className="overflow-y-auto p-5">
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="flex items-center gap-2 font-bold text-ink-900">
+              <h3 id="filter-title" className="flex items-center gap-2 font-bold text-ink-900">
                 <Icon name="filter" className="h-4 w-4 text-gold-500" /> فیلتر پیشرفته
               </h3>
-              <button onClick={() => setShowFilters(false)} aria-label="بستن" className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100">
-                <Icon name="x" />
-              </button>
+              <button onClick={() => setShowFilters(false)} aria-label="بستن" className="rounded-full p-1.5 text-slate-400 hover:bg-slate-100"><Icon name="x" /></button>
             </div>
             <FilterPanel
               filters={filters}
@@ -931,17 +964,19 @@ export default function App() {
               نمایش {fmtNum(results.length)} مرکز
             </button>
           </div>
-        </div>
+        </Modal>
       )}
 
-      {detail && <DetailModal c={detail} fav={favIds.has(detail.id)} onFav={toggleFav} onClose={() => setDetail(null)} onCopy={copy} />}
+      {detail && <DetailModal c={detail} fav={favIds.has(detail.id)} onFav={toggleFav} onClose={() => setDetail(null)} onCopy={copy} onRoute={() => { setDetail(null); setRouting(detail); }} />}
+
+      {routing && <RoutingModal key={routing.id} c={routing} demo={isDemo} onClose={() => setRouting(null)} onCopy={copy} />}
 
       {modal && (
         <ImportModal
           tab={modal}
           report={report}
           meta={meta}
-          busy={busy}
+          busy={busy || booting}
           status={status}
           onFile={handleFile}
           onRemote={handleRemote}
