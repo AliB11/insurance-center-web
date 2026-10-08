@@ -1,96 +1,86 @@
-const LOCAL_CANDIDATES = [
-  'data/centers.xlsx', 'centers.xlsx', 'data.xlsx', 'hr.xlsx', 'data/data.xlsx',
-  'data/centers.xls', 'centers.xls',
-];
-
+const LOCAL_CANDIDATES = ['data/centers.xlsx', 'centers.xlsx', 'data.xlsx', 'hr.xlsx', 'data/data.xlsx', 'data/centers.xls', 'centers.xls'];
 const SOURCE_PAGE = 'https://sphbank.ir/hr';
+const MAX_BYTES = 20 * 1024 * 1024;
 
-const PROXIES: ((u: string) => string)[] = [
-  (u) => u,
-  (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-];
-
-function withTimeout(ms: number): { signal: AbortSignal; done: () => void } {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  return { signal: ctrl.signal, done: () => clearTimeout(t) };
+export function remoteUrl(input: string): URL {
+  const url = new URL(input);
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('فقط آدرس HTTP یا HTTPS بدون اطلاعات ورود پذیرفته می‌شود.');
+  }
+  return url;
 }
 
-function isSpreadsheet(buf: ArrayBuffer): boolean {
-  const b = new Uint8Array(buf.slice(0, 4));
-  return (b[0] === 0x50 && b[1] === 0x4b) || (b[0] === 0xd0 && b[1] === 0xcf);
-}
-
-async function fetchBuf(url: string, ms = 15000): Promise<ArrayBuffer | null> {
-  const t = withTimeout(ms);
+async function request(url: string, timeout: number, maxBytes = MAX_BYTES, signal?: AbortSignal): Promise<Uint8Array | null> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timer = setTimeout(abort, timeout);
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
   try {
-    const res = await fetch(url, { signal: t.signal, cache: 'no-cache' });
-    if (!res.ok) return null;
-    const buf = await res.arrayBuffer();
-    return isSpreadsheet(buf) && buf.byteLength > 200 ? buf : null;
-  } catch {
-    return null;
-  } finally {
-    t.done();
-  }
-}
-
-async function fetchText(url: string, ms = 10000): Promise<string | null> {
-  const t = withTimeout(ms);
-  try {
-    const res = await fetch(url, { signal: t.signal });
-    if (!res.ok) return null;
-    return await res.text();
-  } catch {
-    return null;
-  } finally {
-    t.done();
-  }
-}
-
-export interface Loaded {
-  buf: ArrayBuffer;
-  name: string;
-  source: 'local' | 'remote';
-}
-
-/** A spreadsheet that ships next to the app (public/data/centers.xlsx …). */
-export async function tryLocal(): Promise<Loaded | null> {
-  for (const c of LOCAL_CANDIDATES) {
-    const buf = await fetchBuf(`./${c}`, 8000);
-    if (buf) return { buf, name: c.split('/').pop() || c, source: 'local' };
-  }
-  return null;
-}
-
-/** Download from a direct spreadsheet URL or from a web page that links to one. */
-export async function tryRemote(
-  pageUrl: string = SOURCE_PAGE,
-  onStatus?: (s: string) => void,
-): Promise<Loaded | null> {
-  for (const [pi, wrap] of PROXIES.entries()) {
-    onStatus?.(pi === 0 ? 'دریافت مستقیم از آدرس...' : `تلاش از طریق واسط شماره ${pi}...`);
-    // direct spreadsheet?
-    if (/\.xlsx?($|\?)/i.test(pageUrl)) {
-      const buf = await fetchBuf(wrap(pageUrl));
-      if (buf) return { buf, name: decodeURIComponent(pageUrl.split('/').pop() || 'remote.xlsx'), source: 'remote' };
-      continue;
+    const response = await fetch(url, { signal: controller.signal, cache: 'no-cache', credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!response.ok) return null;
+    if (Number(response.headers.get('content-length')) > maxBytes) { controller.abort(); return null; }
+    if (!response.body) return null;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) { await reader.cancel(); return null; }
+      chunks.push(value);
     }
-    const html = await fetchText(wrap(pageUrl));
-    if (!html) continue;
-    const links = Array.from(html.matchAll(/href=["']([^"']+\.xlsx?(?:\?[^"']*)?)["']/gi)).map((m) => m[1]);
-    for (const l of links) {
-      let abs: string;
-      try {
-        abs = new URL(l, pageUrl).toString();
-      } catch {
-        continue;
-      }
-      onStatus?.('در حال دریافت فایل اکسل...');
-      const buf = await fetchBuf(wrap(abs), 30000);
-      if (buf) return { buf, name: decodeURIComponent(abs.split('/').pop()?.split('?')[0] || 'remote.xlsx'), source: 'remote' };
-    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    return bytes;
+  } catch { return null; }
+  finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+}
+
+async function fetchSpreadsheet(url: string, timeout: number, signal?: AbortSignal): Promise<ArrayBuffer | null> {
+  const bytes = await request(url, timeout, MAX_BYTES, signal);
+  if (!bytes || bytes.length < 200) return null;
+  const zip = bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 3 && bytes[3] === 4;
+  const ole = bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;
+  return zip || ole ? bytes.buffer as ArrayBuffer : null;
+}
+
+export interface Loaded { buf: ArrayBuffer; name: string; source: 'local' | 'remote' }
+
+/** Bounded parallel probes avoid seven consecutive network timeouts at boot. */
+export async function tryLocal(signal?: AbortSignal): Promise<Loaded | null> {
+  const results = await Promise.all(LOCAL_CANDIDATES.map(async (candidate): Promise<Loaded | null> => {
+    const buf = await fetchSpreadsheet(`./${candidate}`, 4000, signal);
+    return buf ? { buf, name: candidate.split('/').pop()!, source: 'local' } : null;
+  }));
+  return results.find(Boolean) ?? null;
+}
+
+function fileName(url: URL): string {
+  const name = url.pathname.split('/').pop() || 'remote.xlsx';
+  try { return decodeURIComponent(name); } catch { return name; }
+}
+
+/** No public CORS relays: never send source URLs through untrusted third parties. */
+export async function tryRemote(pageUrl = SOURCE_PAGE, onStatus?: (s: string) => void): Promise<Loaded | null> {
+  const url = remoteUrl(pageUrl);
+  onStatus?.('دریافت مستقیم از آدرس…');
+  if (/\.xls[xm]?$/i.test(url.pathname)) {
+    const buf = await fetchSpreadsheet(url.href, 15000);
+    return buf ? { buf, name: fileName(url), source: 'remote' } : null;
+  }
+  const bytes = await request(url.href, 10000, 2 * 1024 * 1024);
+  if (!bytes) return null;
+  const html = new TextDecoder().decode(bytes);
+  const links = [...html.matchAll(/href\s*=\s*["']([^"']+\.xls[xm]?(?:[?#][^"']*)?)["']/gi)].slice(0, 5);
+  for (const [, link] of links) {
+    let target: URL;
+    try { target = remoteUrl(new URL(link.replace(/&amp;/g, '&'), url).href); } catch { continue; }
+    onStatus?.('در حال دریافت فایل اکسل…');
+    const buf = await fetchSpreadsheet(target.href, 10000);
+    if (buf) return { buf, name: fileName(target), source: 'remote' };
   }
   return null;
 }

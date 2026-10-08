@@ -2,7 +2,7 @@ import type { Center } from '../lib/parser';
 import { categoryEmoji } from '../lib/search';
 import { catTheme } from '../lib/theme';
 import { toFa } from '../lib/text';
-import { Highlight, Icon, mapsUrl } from './ui';
+import { Highlight, Icon } from './ui';
 
 interface Props {
   c: Center;
@@ -12,10 +12,11 @@ interface Props {
   demo?: boolean;
   onFav: (id: number) => void;
   onOpen: (c: Center) => void;
+  onRoute: (c: Center) => void;
   onCopy: (text: string) => void;
 }
 
-export function CenterCard({ c, tokens, fav, index = 0, demo = false, onFav, onOpen, onCopy }: Props) {
+export function CenterCard({ c, tokens, fav, index = 0, demo = false, onFav, onOpen, onCopy, onRoute }: Props) {
   const loc = [c.province, c.city].filter(Boolean).join('، ');
   const theme = catTheme(c.category, c.kind);
   const stop = (e: React.MouseEvent) => e.stopPropagation();
@@ -116,15 +117,12 @@ export function CenterCard({ c, tokens, fav, index = 0, demo = false, onFav, onO
             <Icon name="phone" className="h-3.5 w-3.5" /> تماس
           </a>
         )}
-        <a
-          href={mapsUrl(c)}
-          target="_blank"
-          rel="noreferrer"
-          onClick={stop}
+        <button
+          onClick={(e) => { stop(e); onRoute(c); }}
           className="inline-flex items-center gap-1.5 rounded-lg bg-ink-800 px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-ink-900"
         >
           <Icon name="pin" className="h-3.5 w-3.5" /> مسیریابی
-        </a>
+        </button>
         <button
           onClick={(e) => { stop(e); onCopy([c.name, loc, c.address, c.phones.map((p) => p.label).join(' / ')].filter(Boolean).join('\n')); }}
           className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-white hover:text-ink-800"

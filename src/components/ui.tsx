@@ -71,10 +71,7 @@ export function Highlight({ text, tokens }: { text: string; tokens: string[] }) 
   return <>{out}</>;
 }
 
-export function mapsUrl(c: { name: string; address: string; city: string; province: string }): string {
-  const q = [c.name, c.address || c.city || c.province, c.city, c.province].filter(Boolean).join(' ');
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
-}
+
 
 /** نشان کوچک کلید کیبورد */
 export function Kbd({ children }: { children: ReactNode }) {

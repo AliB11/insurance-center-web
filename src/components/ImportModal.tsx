@@ -68,12 +68,13 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
                 e.preventDefault();
                 setDrag(false);
                 const f = e.dataTransfer.files?.[0];
-                if (f) onFile(f);
+                if (f && !busy) onFile(f);
               }}
-              onClick={() => input.current?.click()}
+              onClick={() => { if (!busy) input.current?.click(); }}
               role="button"
-              tabIndex={0}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.current?.click(); } }}
+              tabIndex={busy ? -1 : 0}
+              aria-disabled={busy}
+              onKeyDown={(e) => { if (!busy && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); input.current?.click(); } }}
               className={`cursor-pointer rounded-2xl border-2 border-dashed p-8 text-center transition sm:p-10 ${
                 drag ? 'border-gold-400 bg-gold-50' : 'border-slate-300 bg-slate-50 hover:border-ink-300 hover:bg-ink-50/60'
               }`}
@@ -81,15 +82,16 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
               <input
                 ref={input}
                 type="file"
+                disabled={busy}
                 accept=".xlsx,.xls,.xlsm,.csv"
                 className="hidden"
-                onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ''; }}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f && !busy) onFile(f); e.target.value = ''; }}
               />
               <div className={`mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl transition ${drag ? 'bg-gold-100 text-gold-600' : 'bg-ink-100 text-ink-700'}`}>
                 <Icon name="upload" className="h-7 w-7" />
               </div>
               <p className="font-bold text-ink-900">فایل اکسل مراکز را اینجا رها کنید یا کلیک کنید</p>
-              <p className="mt-1 text-sm text-slate-500">فرمت‌های xlsx / xls / csv — همهٔ شیت‌ها به‌صورت خودکار بررسی و ادغام می‌شوند</p>
+              <p className="mt-1 text-sm text-slate-500">حداکثر ۲۰ مگابایت — فرمت‌های xlsx / xls / xlsm / csv — همهٔ شیت‌ها به‌صورت خودکار بررسی و ادغام می‌شوند</p>
               {busy && (
                 <p className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-ink-700">
                   <Spinner className="h-4 w-4" /> در حال پردازش…
@@ -124,7 +126,7 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
             </div>
 
             {status && (
-              <div className="flex items-start gap-3 rounded-xl border border-ink-100 bg-ink-50 px-4 py-3 text-sm text-ink-800">
+              <div role="status" className="flex items-start gap-3 rounded-xl border border-ink-100 bg-ink-50 px-4 py-3 text-sm text-ink-800">
                 <Icon name="info" className="mt-0.5 h-4 w-4 shrink-0 text-ink-400" />
                 <span>{status}</span>
               </div>
@@ -133,7 +135,7 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
             <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 text-sm leading-7 text-slate-600">
               <p className="mb-1 font-semibold text-ink-900">نکات</p>
               <ul className="list-disc space-y-1 pr-5">
-                <li>داده‌ها فقط در مرورگر همین دستگاه ذخیره می‌شوند (بدون سرور و بدون دیتابیس).</li>
+                <li>داده‌ها فقط در مرورگر همین دستگاه ذخیره می‌شوند (بدون ارسال فایل به سرور؛ در حافظهٔ محلی مرورگر).</li>
                 <li>
                   برای انتشار دائمی برای همهٔ کاربران، فایل را با نام{' '}
                   <code dir="ltr" className="rounded bg-white px-1.5 text-xs">centers.xlsx</code> در مسیر{' '}
@@ -156,6 +158,7 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
                 {confirmReset ? (
                   <span className="flex items-center gap-2">
                     <button
+                      disabled={busy}
                       onClick={() => { onReset(); setConfirmReset(false); }}
                       className="rounded-lg bg-rose-600 px-3 py-2 text-xs font-medium text-white hover:bg-rose-700"
                     >
@@ -167,6 +170,7 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
                   </span>
                 ) : (
                   <button
+                    disabled={busy}
                     onClick={() => setConfirmReset(true)}
                     className="inline-flex items-center gap-2 rounded-xl border border-rose-200 px-4 py-2 text-rose-600 transition hover:bg-rose-50"
                   >

@@ -1,9 +1,14 @@
 import * as XLSX from 'xlsx';
+import { parseCoordinates, type Coordinates } from './routing';
+
+export const MAX_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_SHEET_CELLS = 1_000_000;
 import { clean, norm, parsePhones, phonesFromText, toLatinDigits, type Phone } from './text';
 import { canonicalProvince, detectProvince } from './geo';
 
 export interface Center {
   id: number;
+  coordinates?: Coordinates;
   name: string;
   category: string;
   sheet: string;
@@ -40,29 +45,29 @@ export interface ParseResult {
 
 type Field =
   | 'rowno' | 'province' | 'city' | 'fax' | 'discount' | 'service' | 'kind'
-  | 'phone' | 'address' | 'desc' | 'name' | 'extra';
+  | 'phone' | 'address' | 'desc' | 'name' | 'extra' | 'latitude' | 'longitude' | 'category';
 
 export const FIELD_LABEL: Record<string, string> = {
   rowno: 'ردیف (نادیده)', province: 'استان', city: 'شهر', fax: 'فکس', discount: 'تخفیف/قرارداد',
   service: 'تخصص/خدمات', kind: 'نوع مرکز', phone: 'تلفن', address: 'آدرس', desc: 'توضیحات',
-  name: 'نام مرکز', extra: 'اطلاعات تکمیلی',
+  name: 'نام مرکز', extra: 'اطلاعات تکمیلی', latitude: 'عرض جغرافیایی', longitude: 'طول جغرافیایی', category: 'دسته',
 };
 
 const RULES: [Field, RegExp][] = [
-  ['rowno', /ردیف|^(row|no\.?|#|ش\.?ر|شر)$/],
-  ['province', /استان/],
-  ['city', /شهر/],
-  ['fax', /فکس|fax/],
-  ['discount', /تخفیف|درصد|تعرفه|قرارداد|تعهد|فرانشیز|سقف/],
-  ['service', /تخصص|خدمات|رشته|بخش|سرویس|specialty|خدمت/],
-  ['kind', /نوع|دسته|گروه|رده|type|category|کاربری/],
-  ['phone', /تلفن|تماس|موبایل|همراه|phone|tel|^شماره( ها)?$/],
-  ['address', /ادرس|نشانی|address|موقعیت|محل/],
-  ['desc', /توضیح|ملاحظات|شرایط|یادداشت|وضعیت|نکته|توصیه/],
-  [
-    'name',
-    /^(نام|عنوان|name|title)|(^|\s)نام$|^(مرکز|مراکز|مطب|پزشک|دکتر|موسسه|بیمارستان|داروخانه|ازمایشگاه|کلینیک|درمانگاه|واحد|مرکز درمانی|مراکز درمانی|مرکز خدمات درمانی)$/,
-  ],
+  ['latitude', /^(latitude|lat|عرض جغرافیایی)$/],
+  ['longitude', /^(longitude|lng|lon|طول جغرافیایی)$/],
+  ['rowno', /^(ردیف|شماره ردیف|row|no\.?|#|ش\.?ر|شر)$/],
+  ['province', /^(نام )?استان$/],
+  ['city', /^(نام )?(شهر|شهرستان)$/],
+  ['fax', /^(شماره )?(فکس|fax)$/],
+  ['discount', /^(تخفیف|درصد تخفیف|تعرفه|قرارداد|شرایط قرارداد|تخفیف\/قرارداد|تخفیف \/ شرایط قرارداد|تعهد|فرانشیز|سقف تعهدات)$/],
+  ['service', /^(تخصص|خدمات|رشته|بخش|سرویس|specialty|خدمت|تخصص\/خدمات|تخصص \/ خدمات)$/],
+  ['category', /^(دسته( بندی)?|category)$/],
+  ['kind', /^(نوع( مرکز)?|گروه|رده|type|کاربری)$/],
+  ['phone', /^(?:(شماره( های?)? )?(تلفن( تماس| همراه| مرکز| ثابت| \/ همراه|\d+| \d+)?|تماس|موبایل|همراه|phone|tel)|شماره( ها)?)$/],
+  ['address', /^(ادرس|نشانی|address|موقعیت|محل)( مرکز| مطب| موسسه)?$/],
+  ['desc', /^(توضیحات?|ملاحظات|شرایط|یادداشت|وضعیت|نکته|توصیه)$/],
+  ['name', /^(نام( و نام خانوادگی| مرکز( درمانی)?| مراکز| پزشک| موسسه| بیمارستان| داروخانه| ازمایشگاه)?|عنوان( مرکز)?|name|title|مرکز|مراکز|مطب|پزشک|دکتر|موسسه|بیمارستان|داروخانه|ازمایشگاه|کلینیک|درمانگاه|واحد|مرکز درمانی|مراکز درمانی|مرکز خدمات درمانی|مراکز خدمات درمانی)$/],
 ];
 
 const MULTI: Field[] = ['phone', 'address', 'discount', 'service', 'desc', 'kind'];
@@ -119,12 +124,14 @@ function fixSheet(ws: XLSX.WorkSheet): boolean {
   for (const k of Object.keys(ws)) {
     if (k[0] === '!') continue;
     const a = XLSX.utils.decode_cell(k);
+    if ((a.r + 1) * (a.c + 1) > MAX_SHEET_CELLS) throw new Error('ابعاد شیت بیش از حد مجاز است');
     if (a.r > maxR) maxR = a.r;
     if (a.c > maxC) maxC = a.c;
   }
   if (maxR < 0) return false;
   const merges = (ws['!merges'] || []) as XLSX.Range[];
   for (const m of merges) {
+    if ((m.e.r + 1) * (m.e.c + 1) > MAX_SHEET_CELLS) throw new Error('ابعاد ادغام بیش از حد مجاز است');
     const tl = ws[XLSX.utils.encode_cell(m.s)];
     if (!tl) continue;
     if (m.e.r > m.s.r) {
@@ -141,6 +148,7 @@ function fixSheet(ws: XLSX.WorkSheet): boolean {
     if (m.e.r > maxR) maxR = m.e.r;
     if (m.e.c > maxC) maxC = m.e.c;
   }
+  if ((maxR + 1) * (maxC + 1) > MAX_SHEET_CELLS) throw new Error('شیت بیش از یک میلیون خانه دارد');
   ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
   return true;
 }
@@ -159,7 +167,7 @@ function buildPlan(headers: string[], rows: string[][], start: number): ColPlan 
     if (f === 'fax') f = 'extra';
     if (f !== 'extra' && f !== 'rowno' && !MULTI.includes(f) && used.has(f)) f = 'extra';
     if (f !== 'extra' && f !== 'rowno') used.add(f);
-    const hasData = rows.slice(start).some((r) => r[i]);
+    const hasData = !!h || rows.slice(start).some((r) => r[i]);
     if (!h && !hasData) f = 'rowno';
     fields.push(f);
     labels.push(h || `ستون ${XLSX.utils.encode_col(i)}`);
@@ -168,7 +176,7 @@ function buildPlan(headers: string[], rows: string[][], start: number): ColPlan 
 }
 
 function guessPlan(rows: string[][]): { plan: ColPlan; start: number } {
-  const width = Math.max(0, ...rows.map((r) => r.length));
+  const width = rows.reduce((max, r) => Math.max(max, r.length), 0);
   const sample = rows.filter((r) => r.filter(Boolean).length >= 2).slice(0, 40);
   const start = Math.max(0, rows.findIndex((r) => r.some(Boolean)));
   const fields: Field[] = new Array(width).fill('extra');
@@ -268,7 +276,7 @@ function parseSheet(
       const ne = next.filter(Boolean);
       const fsNext = fieldSet(next).size;
       const noDigits = !ne.some((v) => toLatinDigits(v).replace(/\D/g, '').length >= 5);
-      const headerish = ne.every((v) => mapHeader(v) !== 'extra' || v.length <= 15);
+      const headerish = ne.every((v) => mapHeader(v) !== 'extra');
       if (ne.length > 0 && ne.length <= rows[h].filter(Boolean).length && fsNext >= 1 && noDigits && headerish) {
         headers = headers.map((x, i) => {
           const y = next[i] || '';
@@ -340,7 +348,7 @@ function parseSheet(
     if (fs.size >= 2 && fs.size >= Math.max(2, hScore - 1)) {
       const looksHeader = row.filter(Boolean).every((v) => v.length <= 45) &&
         !row.some((v) => toLatinDigits(v).replace(/\D/g, '').length >= 7);
-      if (looksHeader) {
+      if (looksHeader && row.filter(Boolean).every((v) => mapHeader(v) !== 'extra')) {
         const p2 = buildPlan(row, rows, r + 1);
         currentFields = p2.fields;
         currentLabels = p2.labels;
@@ -372,6 +380,7 @@ function parseSheet(
         nextIsHeader ||
         (isSectionText(text) && median > 1.5);
       if (treatAsSection) {
+        if (pm || (provDetected && !cm)) { ctxCity = ''; lastCity = ''; lastProv = ''; }
         if (pm) ctxProv = canonicalProvince(pm[1]);
         else if (cm) ctxCity = clean(cm[1]);
         else if (provDetected && norm(provDetected) === n.replace(/^استان /, '')) ctxProv = provDetected;
@@ -411,7 +420,7 @@ function parseSheet(
     let phones = parsePhones(phoneRaw);
     if (!phones.length && address) phones = phonesFromText(address);
 
-    if (/^جمع( کل)?\b/.test(norm(name))) {
+    if (/^جمع(?: کل)?(?:\s|$)/.test(norm(name))) {
       if (rep.skipped.length < 40) rep.skipped.push({ row: excelRow, reason: 'سطر جمع', text: name });
       continue;
     }
@@ -427,6 +436,7 @@ function parseSheet(
     let city = get('city');
     if (province) {
       province = canonicalProvince(province);
+      if (province !== lastProv) { lastCity = ''; ctxCity = ''; }
       lastProv = province;
     } else if (ctxProv) province = ctxProv;
     else if (lastProv && nameIdx >= 0) {
@@ -435,7 +445,7 @@ function parseSheet(
     }
     if (city) lastCity = city;
     else if (ctxCity) city = ctxCity;
-    else if (lastCity && idxOf('city').length) {
+    else if (lastCity && currentFields.includes('city')) {
       city = lastCity;
       fillDown++;
     }
@@ -445,11 +455,16 @@ function parseSheet(
     const kind = get('kind');
     const service = get('service');
     let category: string;
-    if (generic || sheetIsProvince) {
+    if (get('category')) category = get('category');
+    else if (generic || sheetIsProvince) {
       category = kind || inferKind(name, ctxSection, service) || sheetKind || (ctxSection && ctxSection.length < 30 ? ctxSection : '') || 'سایر';
     } else category = clean(sheetName);
     if (category === norm(category) && category.length === 0) category = 'سایر';
 
+    const coordinates = parseCoordinates(get('latitude'), get('longitude'));
+    if (!coordinates && (get('latitude') || get('longitude'))) {
+      if (rep.notes.length < 50) rep.notes.push(`مختصات ردیف ${excelRow} نامعتبر بود و برای مسیریابی استفاده نشد.`);
+    }
     const discount = get('discount');
     const desc = get('desc');
 
@@ -463,7 +478,7 @@ function parseSheet(
     );
     centers.push({
       id: startId + centers.length,
-      name, category, sheet: sheetName, province, city, address, phones,
+      coordinates, name, category, sheet: sheetName, province, city, address, phones,
       kind, service, discount, desc, extra,
       search: searchStr,
       nameN: norm(name),
@@ -485,7 +500,10 @@ function parseSheet(
 }
 
 export function parseWorkbook(buf: ArrayBuffer): ParseResult {
-  const wb = XLSX.read(buf, { type: 'array', cellDates: false, cellText: true });
+  if (!buf.byteLength || buf.byteLength > MAX_FILE_BYTES) throw new Error('فایل باید غیرخالی و حداکثر ۲۰ مگابایت باشد');
+  const signature = new Uint8Array(buf, 0, Math.min(buf.byteLength, 2));
+  const binary = (signature[0] === 0x50 && signature[1] === 0x4b) || (signature[0] === 0xd0 && signature[1] === 0xcf);
+  const wb = XLSX.read(buf, { type: 'array', cellDates: false, cellText: true, ...(binary ? {} : { codepage: 65001 }) });
   const all: Center[] = [];
   const report: SheetReport[] = [];
   wb.SheetNames.forEach((name, i) => {

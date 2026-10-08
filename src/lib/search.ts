@@ -31,8 +31,8 @@ export function applyFilters(
     if (exclude !== 'province' && f.province && c.province !== f.province) return false;
     if (exclude !== 'city' && f.city && c.city !== f.city) return false;
     if (exclude !== 'kind' && f.kind && c.kind !== f.kind) return false;
-    if (f.hasPhone && c.phones.length === 0) return false;
-    if (f.favOnly && !favs.has(c.id)) return false;
+    if (exclude !== 'hasPhone' && f.hasPhone && c.phones.length === 0) return false;
+    if (exclude !== 'favOnly' && f.favOnly && !favs.has(c.id)) return false;
     for (const t of toks) if (!c.search.includes(t)) return false;
     return true;
   });

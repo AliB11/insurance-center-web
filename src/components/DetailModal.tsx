@@ -3,17 +3,18 @@ import { categoryEmoji } from '../lib/search';
 import { catTheme } from '../lib/theme';
 import { toFa } from '../lib/text';
 import { Modal } from './Modal';
-import { Icon, mapsUrl } from './ui';
+import { Icon } from './ui';
 
 interface Props {
   c: Center;
   fav: boolean;
   onFav: (id: number) => void;
   onClose: () => void;
+  onRoute: () => void;
   onCopy: (t: string) => void;
 }
 
-export function DetailModal({ c, fav, onFav, onClose, onCopy }: Props) {
+export function DetailModal({ c, fav, onFav, onClose, onCopy, onRoute }: Props) {
   const rows: [string, string][] = [
     ['دسته', c.category],
     ['نوع مرکز', c.kind],
@@ -25,7 +26,7 @@ export function DetailModal({ c, fav, onFav, onClose, onCopy }: Props) {
     ['توضیحات', c.desc],
     ...Object.entries(c.extra),
   ];
-  const visible = rows.filter(([, v]) => v && v !== c.category);
+  const visible = rows.filter(([k, v]) => v && !(k === 'نوع مرکز' && v === c.category));
   const text = [c.name, [c.province, c.city].filter(Boolean).join('، '), c.address, c.phones.map((p) => p.label).join(' / ')]
     .filter(Boolean)
     .join('\n');
@@ -100,14 +101,12 @@ export function DetailModal({ c, fav, onFav, onClose, onCopy }: Props) {
       </div>
 
       <div className="flex flex-wrap gap-2 border-t border-slate-100 bg-slate-50 p-4">
-        <a
-          href={mapsUrl(c)}
-          target="_blank"
-          rel="noreferrer"
+        <button
+          onClick={onRoute}
           className="inline-flex items-center gap-2 rounded-xl bg-ink-800 px-4 py-2 text-sm font-medium text-white transition hover:bg-ink-900"
         >
-          <Icon name="pin" className="h-4 w-4" /> مسیریابی روی نقشه
-        </a>
+          <Icon name="pin" className="h-4 w-4" /> انتخاب مسیریاب
+        </button>
         <button
           onClick={() => onCopy(text)}
           className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
