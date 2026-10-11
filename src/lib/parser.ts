@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { parseCoordinates, type Coordinates } from './routing';
+import { coordinateSanity, parseCoordinates, type Coordinates } from './routing';
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_SHEET_CELLS = 1_000_000;
@@ -332,6 +332,8 @@ function parseSheet(
   const seen = new Set<string>();
   let dups = 0;
   let noName = 0;
+  let suspiciousCoords = 0;
+  const suspiciousRows: number[] = [];
 
   const nextNonEmpty = (from: number) => {
     for (let j = from; j < rows.length; j++) if (rows[j].some(Boolean)) return rows[j];
@@ -465,6 +467,10 @@ function parseSheet(
     if (!coordinates && (get('latitude') || get('longitude'))) {
       if (rep.notes.length < 50) rep.notes.push(`مختصات ردیف ${excelRow} نامعتبر بود و برای مسیریابی استفاده نشد.`);
     }
+    if (coordinates && coordinateSanity(coordinates).state !== 'ok') {
+      suspiciousCoords++;
+      if (suspiciousRows.length < 3) suspiciousRows.push(excelRow);
+    }
     const discount = get('discount');
     const desc = get('desc');
 
@@ -494,6 +500,7 @@ function parseSheet(
   if (fillDown) rep.notes.push(`${fillDown} خانه‌ی خالی استان/شهر از ردیف‌های بالاتر تکمیل شد.`);
   if (noName) rep.notes.push(`${noName} ردیف بدون «نام» بود و از ستون‌های دیگر نام‌گذاری شد.`);
   if (dups) rep.notes.push(`${dups} ردیف تکراری (نام+آدرس+تلفن یکسان) وجود دارد (حذف نشد).`);
+  if (suspiciousCoords) rep.notes.push(`مختصات ${suspiciousCoords} ردیف با نقشهٔ ایران هم‌خوان نیست (بیرون ایران، صفر، یا جابه‌جایی احتمالی عرض/طول — نمونه سطر: ${suspiciousRows.join('، ')}${suspiciousCoords > suspiciousRows.length ? '، …' : ''})؛ داده نگه داشته شد و در پنجرهٔ مسیریابی هشدار داده می‌شود.`);
   if (sheetIsProvince) rep.notes.push(`نام شیت به‌عنوان استان «${sheetProvince}» شناخته شد.`);
   if (centers.length === 0) rep.notes.push('هیچ مرکزی از این شیت استخراج نشد.');
   return { centers, rep };

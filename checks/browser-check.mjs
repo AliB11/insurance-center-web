@@ -34,8 +34,11 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('article').length === 24); pass('print includes all filtered rows and restores pagination');
   await page.locator('article').first().getByRole('button', { name: 'مسیریابی', exact: true }).click();
   let dialog = page.getByRole('dialog');
-  assert.match(await dialog.innerText(), /مختصات ندارد/);
-  assert.equal(await dialog.locator('a[href*="nshn.ir"]').count(), 0); pass('no fabricated Neshan link for unlocated demo center');
+  const demoHref = await dialog.locator('a[href*="nshn.ir"]').first().getAttribute('href');
+  assert.match(demoHref ?? '', /^https:\/\/nshn\.ir\/\?lat=3\d\.\d+&lng=5\d\.\d+$/);
+  assert.match(await dialog.innerText(), /تقریبی/);
+  assert.equal(await dialog.locator('a[href^="neshan://"]').getAttribute('target'), '_blank');
+  pass('demo centers ship approximate city coordinates wired into documented Neshan links');
   await dialog.locator('summary').click();
   await dialog.getByRole('textbox', { name: 'عرض جغرافیایی', exact: true }).fill('۹۵');
   await dialog.getByRole('textbox', { name: 'طول جغرافیایی', exact: true }).fill('۵۱');
@@ -48,6 +51,13 @@ try {
   await dialog.getByRole('button', { name: 'استفاده از موقعیت من برای مبدأ نشان' }).click();
   await dialog.getByRole('link', { name: 'مسیریابی با نشان از موقعیت من' }).waitFor();
   assert.equal(await dialog.locator('a[href*="nshn.ir"]').getAttribute('href'), 'https://nshn.ir/?origin=35.8,51.5&destination=35.7,51.4&vehicle=d'); pass('permission-based location becomes route origin');
+  await dialog.locator('#routing-vehicle').selectOption('m');
+  assert.match(await dialog.locator('a[href*="nshn.ir"]').first().getAttribute('href') ?? '', /&vehicle=m$/);
+  await dialog.locator('#routing-vehicle').selectOption('d');
+  const googleHref = await dialog.locator('a[href*="google.com/maps/dir"]').getAttribute('href');
+  assert.ok(googleHref && decodeURIComponent(googleHref).includes('origin=35.8,51.5'));
+  assert.match(await dialog.innerText(), /فاصلهٔ مبدأ تا مقصد حدوداً/);
+  pass('vehicle switch and Google directions reuse the same GPS origin');
   await page.keyboard.press('Escape');
   assert.equal(await page.getByRole('dialog').count(), 0); pass('route modal Escape closes');
 
@@ -66,6 +76,19 @@ try {
   await dialog.getByRole('button', { name: 'استفاده از موقعیت من برای مبدأ نشان' }).click();
   await dialog.getByRole('alert').waitFor();
   assert.match(await dialog.getByRole('alert').innerText(), /دسترسی/); pass('GPS denial preserves destination fallback');
+  await page.keyboard.press('Escape');
+
+  await page.locator('article').nth(1).getByRole('button', { name: 'مسیریابی', exact: true }).click();
+  dialog = page.getByRole('dialog');
+  assert.match(await dialog.innerText(), /این مرکز مختصات ندارد/);
+  assert.equal(await dialog.locator('a[href*="nshn.ir"]').count(), 0);
+  assert.match(await dialog.innerText(), /تبدیل آدرس به مختصات/);
+  await page.route('**nominatim.openstreetmap.org/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ lat: '29.59', lon: '52.58', display_name: 'فارس، شیراز، خیابان زند', address: { city: 'شیراز', state: 'فارس' } }]), headers: { 'access-control-allow-origin': '*' } }));
+  await dialog.getByRole('button', { name: /جستجو با نقشهٔ آزاد OSM/ }).click();
+  await dialog.getByRole('button', { name: 'تأیید و استفاده از این نقطه' }).click();
+  assert.equal(await dialog.locator('a[href*="nshn.ir"]').first().getAttribute('href'), 'https://nshn.ir/?lat=29.59&lng=52.58');
+  assert.match(await dialog.innerText(), /تأییدشده از جستجوی آدرس/);
+  pass('unlocated center gains a confirmed point only through the vetted candidate flow');
   await page.keyboard.press('Escape');
 
   await openImport();
