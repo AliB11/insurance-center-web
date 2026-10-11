@@ -969,7 +969,7 @@ export default function App() {
 
       {detail && <DetailModal c={detail} fav={favIds.has(detail.id)} onFav={toggleFav} onClose={() => setDetail(null)} onCopy={copy} onRoute={() => { setDetail(null); setRouting(detail); }} />}
 
-      {routing && <RoutingModal key={routing.id} c={routing} demo={isDemo} onClose={() => setRouting(null)} onCopy={copy} />}
+      {routing && <RoutingModal key={routing.id} c={routing} demo={isDemo} peers={centers} onClose={() => setRouting(null)} onCopy={copy} />}
 
       {modal && (
         <ImportModal

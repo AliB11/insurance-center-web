@@ -125,6 +125,42 @@ async function main() {
   must('مودال با Escape بسته شد', count('[role="dialog"][aria-modal="true"]') === 0);
   must('قفل اسکرول برداشته شد', dom.window.document.body.style.overflow !== 'hidden');
 
+  // ----- تعامل ۵.۵: پنجرهٔ مسیریابی، مختصات تقریبی و اصلاح جابه‌جایی -----
+  const routeBtn = Array.from(dom.window.document.querySelectorAll('article button'))
+    .find((b) => (b.textContent || '').trim() === 'مسیریابی') as HTMLButtonElement;
+  await act(async () => { routeBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  const dlg = dom.window.document.querySelector('[role="dialog"][aria-modal="true"]') as HTMLElement;
+  must('مودال مسیریابی باز شد', !!dlg);
+  must('برای مرکز نمونه لینک نشان ساخته می‌شود (مختصات تقریبی شهر)', /href="https:\/\/nshn\.ir\/\?lat=3/.test(dlg.innerHTML));
+  must('متن توضیح دادهٔ نمونه به تقریبی‌بودن مختصات اشاره می‌کند', (dlg.textContent || '').includes('تقریبی'));
+  must('لینک iOS در سربرگ جدید باز می‌شود', Array.from(dlg.querySelectorAll('a[href^="nshn://"]')).every((a) => a.getAttribute('target') === '_blank'));
+  must('دکمهٔ کپی لینک نشان برای ارسال به گوشی هست', (dlg.textContent || '').includes('کپی لینک نشان'));
+  const detailsEl = dlg.querySelector('details') as HTMLDetailsElement;
+  await act(async () => { detailsEl.open = true; }); // jsdom روی کلیک summary همیشه toggle نمی‌کند
+  const latInput = dlg.querySelector('input[aria-label="عرض جغرافیایی"]') as HTMLInputElement;
+  const lngInput = dlg.querySelector('input[aria-label="طول جغرافیایی"]') as HTMLInputElement;
+  await act(async () => {
+    setter.call(latInput, '۵۱');
+    latInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    setter.call(lngInput, '۳۵');
+    lngInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    (dlg.querySelector('form button') as HTMLButtonElement).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  });
+  must('هشدار جابه‌جایی عرض/طول نمایش داده می‌شود', (dlg.textContent || '').includes('جابه‌جا'));
+  const fixBtn = Array.from(dlg.querySelectorAll('button')).find((b) => (b.textContent || '').includes('اصلاح پیشنهادی')) as HTMLButtonElement;
+  await act(async () => { fixBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  const nshnAnchor = dlg.querySelector('a[href*="nshn.ir"]') as HTMLAnchorElement;
+  must('پس از اصلاح، لینک نشان به نقطهٔ درست‌شده اشاره می‌کند', /lat=35&lng=51$/.test(nshnAnchor.getAttribute('href') || ''));
+  const gpsBtn = Array.from(dlg.querySelectorAll('button')).find((b) => (b.textContent || '').includes('موقعیت من')) as HTMLButtonElement;
+  await act(async () => { gpsBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  must('عدم GPS در محیط تست پیام راهنما می‌گیرد', (dlg.textContent || '').includes('مکان‌یابی در این مرورگر در دسترس نیست'));
+  await act(async () => {
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  must('پنجرهٔ مسیریابی با Escape بسته شد', count('[role="dialog"][aria-modal="true"]') === 0);
+
   // ----- تعامل ۶: تغییر حالت نمایش به جدول -----
   const tableBtn = dom.window.document.querySelector('button[title="جدول"]') as HTMLButtonElement;
   await act(async () => { tableBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });

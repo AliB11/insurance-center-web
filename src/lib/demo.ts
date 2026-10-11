@@ -1,4 +1,5 @@
 import type { Center } from './parser';
+import type { Coordinates } from './routing';
 import { norm, type Phone } from './text';
 
 /**
@@ -8,49 +9,51 @@ import { norm, type Phone } from './text';
  * همیشه با صفحهٔ «فایلی بارگذاری نشد» باز می‌شود و هیچ‌چیز برای دیدن
  * وجود ندارد. این داده‌ها فقط برای نمایش رابط کاربری ساخته شده‌اند:
  *   • شمارهٔ تلفن‌ها عمداً با الگوی ۰۰۰۰۰۰۰ ساخته شده‌اند (واقعی نیستند)
+ *   • مختصات هر مرکز تقریبی و بر پایهٔ مرکز شهر است (~۴ کیلومتر جابه‌جایی قطعی)
+ *     تا جریان مسیریابی/نقشه قابل دیدن باشد؛ نقطهٔ واقعی هیچ مطب یا بیمارستانی نیست
  *   • نام مراکز ترکیبی و ساختگی است
  * با بارگذاری فایل واقعی مراکز طرف قرارداد، این مجموعه کنار گذاشته می‌شود.
  */
 
-const REGIONS: { province: string; city: string; code: string }[] = [
-  { province: 'تهران', city: 'تهران', code: '021' },
-  { province: 'تهران', city: 'کرج', code: '026' },
-  { province: 'تهران', city: 'ورامین', code: '021' },
-  { province: 'اصفهان', city: 'اصفهان', code: '031' },
-  { province: 'اصفهان', city: 'کاشان', code: '031' },
-  { province: 'فارس', city: 'شیراز', code: '071' },
-  { province: 'فارس', city: 'جهرم', code: '071' },
-  { province: 'خراسان رضوی', city: 'مشهد', code: '051' },
-  { province: 'خراسان رضوی', city: 'نیشابور', code: '051' },
-  { province: 'آذربایجان شرقی', city: 'تبریز', code: '041' },
-  { province: 'آذربایجان غربی', city: 'ارومیه', code: '044' },
-  { province: 'البرز', city: 'کرج', code: '026' },
-  { province: 'گیلان', city: 'رشت', code: '013' },
-  { province: 'مازندران', city: 'ساری', code: '011' },
-  { province: 'مازندران', city: 'آمل', code: '011' },
-  { province: 'کرمان', city: 'کرمان', code: '034' },
-  { province: 'خوزستان', city: 'اهواز', code: '061' },
-  { province: 'خوزستان', city: 'دزفول', code: '061' },
-  { province: 'گلستان', city: 'گرگان', code: '017' },
-  { province: 'هرمزگان', city: 'بندرعباس', code: '076' },
-  { province: 'همدان', city: 'همدان', code: '081' },
-  { province: 'کردستان', city: 'سنندج', code: '087' },
-  { province: 'لرستان', city: 'خرم‌آباد', code: '066' },
-  { province: 'کرمانشاه', city: 'کرمانشاه', code: '083' },
-  { province: 'مرکزی', city: 'اراک', code: '086' },
-  { province: 'قم', city: 'قم', code: '025' },
-  { province: 'قزوین', city: 'قزوین', code: '028' },
-  { province: 'زنجان', city: 'زنجان', code: '024' },
-  { province: 'یزد', city: 'یزد', code: '035' },
-  { province: 'اردبیل', city: 'اردبیل', code: '045' },
-  { province: 'بوشهر', city: 'بوشهر', code: '077' },
-  { province: 'سمنان', city: 'شاهرود', code: '023' },
-  { province: 'سیستان و بلوچستان', city: 'زاهدان', code: '054' },
-  { province: 'ایلام', city: 'ایلام', code: '084' },
-  { province: 'چهارمحال و بختیاری', city: 'شهرکرد', code: '038' },
-  { province: 'کهگیلویه و بویراحمد', city: 'یاسوج', code: '074' },
-  { province: 'خراسان شمالی', city: 'بجنورد', code: '058' },
-  { province: 'خراسان جنوبی', city: 'بیرجند', code: '056' },
+const REGIONS: { province: string; city: string; code: string; center: [number, number] }[] = [
+  { province: 'تهران', city: 'تهران', code: '021' , center: [35.6892, 51.389] },
+  { province: 'تهران', city: 'کرج', code: '026' , center: [35.8327, 50.9915] },
+  { province: 'تهران', city: 'ورامین', code: '021' , center: [35.3252, 51.6451] },
+  { province: 'اصفهان', city: 'اصفهان', code: '031' , center: [32.6546, 51.668] },
+  { province: 'اصفهان', city: 'کاشان', code: '031' , center: [33.9816, 51.4056] },
+  { province: 'فارس', city: 'شیراز', code: '071' , center: [29.5918, 52.5837] },
+  { province: 'فارس', city: 'جهرم', code: '071' , center: [28.5095, 52.8014] },
+  { province: 'خراسان رضوی', city: 'مشهد', code: '051' , center: [36.2605, 59.6168] },
+  { province: 'خراسان رضوی', city: 'نیشابور', code: '051' , center: [36.2133, 58.7958] },
+  { province: 'آذربایجان شرقی', city: 'تبریز', code: '041' , center: [38.0962, 46.2738] },
+  { province: 'آذربایجان غربی', city: 'ارومیه', code: '044' , center: [37.5553, 45.0737] },
+  { province: 'البرز', city: 'کرج', code: '026' , center: [35.8327, 50.9915] },
+  { province: 'گیلان', city: 'رشت', code: '013' , center: [37.2808, 49.5832] },
+  { province: 'مازندران', city: 'ساری', code: '011' , center: [36.5633, 53.0601] },
+  { province: 'مازندران', city: 'آمل', code: '011' , center: [36.4703, 52.7113] },
+  { province: 'کرمان', city: 'کرمان', code: '034' , center: [30.2839, 57.1446] },
+  { province: 'خوزستان', city: 'اهواز', code: '061' , center: [31.3183, 48.6706] },
+  { province: 'خوزستان', city: 'دزفول', code: '061' , center: [32.3807, 48.3988] },
+  { province: 'گلستان', city: 'گرگان', code: '017' , center: [36.8459, 54.4391] },
+  { province: 'هرمزگان', city: 'بندرعباس', code: '076' , center: [27.1832, 56.2666] },
+  { province: 'همدان', city: 'همدان', code: '081' , center: [34.7941, 48.5141] },
+  { province: 'کردستان', city: 'سنندج', code: '087' , center: [35.3134, 47.0106] },
+  { province: 'لرستان', city: 'خرم‌آباد', code: '066' , center: [33.4804, 48.3838] },
+  { province: 'کرمانشاه', city: 'کرمانشاه', code: '083' , center: [34.3142, 47.065] },
+  { province: 'مرکزی', city: 'اراک', code: '086' , center: [34.0917, 49.6892] },
+  { province: 'قم', city: 'قم', code: '025' , center: [34.6399, 50.8788] },
+  { province: 'قزوین', city: 'قزوین', code: '028' , center: [36.2713, 50.0007] },
+  { province: 'زنجان', city: 'زنجان', code: '024' , center: [36.6864, 48.4888] },
+  { province: 'یزد', city: 'یزد', code: '035' , center: [31.8974, 54.3565] },
+  { province: 'اردبیل', city: 'اردبیل', code: '045' , center: [38.2475, 48.2933] },
+  { province: 'بوشهر', city: 'بوشهر', code: '077' , center: [28.9684, 50.8385] },
+  { province: 'سمنان', city: 'شاهرود', code: '023' , center: [36.4182, 55.6606] },
+  { province: 'سیستان و بلوچستان', city: 'زاهدان', code: '054' , center: [29.4892, 60.8584] },
+  { province: 'ایلام', city: 'ایلام', code: '084' , center: [33.6338, 46.422] },
+  { province: 'چهارمحال و بختیاری', city: 'شهرکرد', code: '038' , center: [32.3295, 50.8561] },
+  { province: 'کهگیلویه و بویراحمد', city: 'یاسوج', code: '074' , center: [30.6682, 51.588] },
+  { province: 'خراسان شمالی', city: 'بجنورد', code: '058' , center: [37.4787, 57.329] },
+  { province: 'خراسان جنوبی', city: 'بیرجند', code: '056' , center: [32.8663, 59.061] },
 ];
 
 interface Spec {
@@ -151,6 +154,15 @@ function fakePhone(code: string, n: number): Phone {
   return { label: `${code}-000${tail}`, tel: `${code}000${tail}` };
 }
 
+/** Approximate demo point around a city center (deterministic, ±~0.04°). */
+function demoPoint(center: [number, number], seedA: number, seedB: number): Coordinates {
+  const jitter = (seed: number) => (((seed * 37) % 21) - 10) * 0.0045;
+  return {
+    lat: Number((center[0] + jitter(seedA)).toFixed(6)),
+    lng: Number((center[1] + jitter(seedB)).toFixed(6)),
+  };
+}
+
 function build(): Center[] {
   const list: Center[] = [];
   let n = 0;
@@ -166,6 +178,8 @@ function build(): Center[] {
       const phones: Phone[] = [fakePhone(region.code, n * 3 + k)];
       if ((n + k) % 3 === 0) phones.push(fakePhone(region.code, n * 5 + k + 4000));
       const desc = (n + k) % 5 === 0 ? 'پیش از مراجعه، هماهنگی تلفنی لازم است.' : '';
+      // مختصات تقریبی شهر + جابه‌جایی قطعی ~۵ کیلومتری تا نقاط همه روی یک‌نقطه نیفتند
+      const coordinates = demoPoint(region.center, n * 3 + k, n + k * 5);
       n++;
       const search = norm(
         [name, spec.category, spec.kind, spec.service, region.province, region.city, address,
@@ -173,6 +187,7 @@ function build(): Center[] {
       );
       list.push({
         id: list.length,
+        coordinates,
         name,
         category: spec.category,
         sheet: 'دادهٔ نمونه',
