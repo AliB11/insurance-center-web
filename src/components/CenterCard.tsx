@@ -1,5 +1,5 @@
 import type { Center } from '../lib/parser';
-import { categoryEmoji } from '../lib/search';
+import { categoryEmoji, placeLabel } from '../lib/search';
 import { catTheme } from '../lib/theme';
 import { toFa } from '../lib/text';
 import { Highlight, Icon } from './ui';
@@ -17,7 +17,7 @@ interface Props {
 }
 
 export function CenterCard({ c, tokens, fav, index = 0, demo = false, onFav, onOpen, onCopy, onRoute }: Props) {
-  const loc = [c.province, c.city].filter(Boolean).join('، ');
+  const loc = placeLabel(c);
   const theme = catTheme(c.category, c.kind);
   const stop = (e: React.MouseEvent) => e.stopPropagation();
 

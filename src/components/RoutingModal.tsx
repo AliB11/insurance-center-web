@@ -10,6 +10,7 @@ import {
 import { toFa } from '../lib/text';
 import { Modal, ModalHeader } from './Modal';
 import { Icon, Spinner } from './ui';
+import { DATA_SCOPE } from '../lib/scope';
 
 interface Props {
   c: Center;
@@ -82,13 +83,15 @@ export function RoutingModal({ c, demo, peers = [], onClose, onCopy }: Props) {
       const found = await lookupCandidates(
         { name: c.name, province: c.province, city: c.city, address: c.address },
         peers,
-        { source, key: keyInput.trim() || loadNeshanKey() },
+        // بدون signal، بستن پنجره یا جستجوی دوباره درخواست قبلی را لغو نمی‌کرد و پاسخ دیرتر رسیدهٔ
+        // منبع قبلی می‌توانست نتیجهٔ جدید را بازنویسی کند
+        { source, key: keyInput.trim() || loadNeshanKey(), signal: controller.signal },
       );
-      if (!alive.current) return;
+      if (!alive.current || geoAbort.current !== controller) return;
       setCandidates(found);
       setGeoState('done');
     } catch (e) {
-      if (!alive.current || (e as Error).message === 'ABORT') return;
+      if (!alive.current || geoAbort.current !== controller || (e as Error).message === 'ABORT') return;
       setGeoError((e as Error).message || 'جستجو ناموفق بود.');
       setGeoState('idle');
     }
@@ -171,7 +174,7 @@ export function RoutingModal({ c, demo, peers = [], onClose, onCopy }: Props) {
               تبدیل آدرس به مختصات (با تأیید خودتان)
             </h3>
             <p className="mt-1 text-xs leading-6 text-slate-500">
-              جستجو فقط با کلیک روی دکمه‌های زیر انجام می‌شود. پاسخ‌ها باید با استان/شهر مرکز بخوانند و در صورت وجود،
+              جستجو فقط با کلیک روی دکمه‌های زیر انجام می‌شود. پاسخ‌ها باید با استان/شهر مرکز بخوانند{DATA_SCOPE ? ` و داخل محدودهٔ استان ${DATA_SCOPE.province} باشند` : ''}، در صورت وجود
               به سایر مراکز هم‌شهر نزدیک باشند؛ نتیجهٔ بیرونی یا دور، رد می‌شود. انتخاب نهایی با شماست.
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">

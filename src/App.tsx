@@ -10,8 +10,10 @@ import { ImportModal } from './components/ImportModal';
 import { Highlight, Icon, Kbd, Spinner, Wave } from './components/ui';
 import { DEMO_FILE_NAME, demoCenters } from './lib/demo';
 import { tryLocal, tryRemote } from './lib/loader';
+import { DATA_SCHEMA, migrateStored, migrationMessage } from './lib/migrate';
 import { MAX_FILE_BYTES, parseWorkbook, type Center, type SheetReport } from './lib/parser';
-import { applyFilters, categoryEmoji, countBy, EMPTY_FILTERS, relevance, tokensOf, type Filters } from './lib/search';
+import { DATA_SCOPE, scopeLabel } from './lib/scope';
+import { applyFilters, categoryEmoji, countBy, EMPTY_FILTERS, placeLabel, relevance, tokensOf, type Filters } from './lib/search';
 import { catTheme } from './lib/theme';
 import { clearStored, loadList, loadStored, saveData, saveList, type Meta } from './lib/storage';
 import { fmtNum, norm, toFa } from './lib/text';
@@ -58,10 +60,10 @@ export default function App() {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const toastTimer = useRef<number | undefined>(undefined);
 
-  const flash = useCallback((m: string) => {
+  const flash = useCallback((m: string, ms = 2600) => {
     setToast(m);
     window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(''), 2600);
+    toastTimer.current = window.setTimeout(() => setToast(''), ms);
   }, []);
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
@@ -74,7 +76,7 @@ export default function App() {
       setStatus('هیچ مرکزی در فایل پیدا نشد؛ دادهٔ فعلی تغییر نکرد. ' + notes);
       return false;
     }
-    const m: Meta = { fileName: name, source, loadedAt: Date.now(), size: buf.byteLength };
+    const m: Meta = { fileName: name, source, loadedAt: Date.now(), size: buf.byteLength, schema: DATA_SCHEMA };
     setCenters(res.centers);
     setReport(res.report);
     setMeta(m);
@@ -86,9 +88,9 @@ export default function App() {
   }, [flash]);
 
   /** دادهٔ نمونه فقط برای اینکه رابط کاربری بدون فایل اکسل هم قابل دیدن باشد */
-  const useDemo = useCallback(() => {
+  const loadDemo = useCallback(() => {
     const list = demoCenters();
-    const m: Meta = { fileName: DEMO_FILE_NAME, source: 'demo', loadedAt: Date.now(), size: 0 };
+    const m: Meta = { fileName: DEMO_FILE_NAME, source: 'demo', loadedAt: Date.now(), size: 0, schema: DATA_SCHEMA };
     setCenters(list);
     setReport([]);
     setMeta(m);
@@ -103,13 +105,21 @@ export default function App() {
     const controller = new AbortController();
     (async () => {
       try {
-        const stored = await loadStored();
-        if (alive && stored?.centers.length && stored.meta?.source && stored.meta.source !== 'demo') {
+        const loaded = await loadStored();
+        if (alive && loaded?.centers.length && loaded.meta?.source && loaded.meta.source !== 'demo') {
+          // دادهٔ نسخه‌های قبل (مثلاً استانِ حدس‌زده از «بزرگراه کردستان») با قواعد فعلی اصلاح می‌شود
+          const migration = migrateStored(loaded);
+          const stored = migration.data;
           setCenters(stored.centers);
           setReport(stored.report);
           setMeta(stored.meta);
           setStatus(`${fmtNum(stored.centers.length)} مرکز از حافظهٔ مرورگر بازیابی شد.`);
           setBooting(false);
+          if (migration.changed) {
+            const saved = await saveData(stored);
+            const message = migrationMessage(migration.summary);
+            if (alive && message) flash(saved ? message : `${message} (ذخیرهٔ مرورگر ممکن نشد)`, 6000);
+          }
           return;
         }
         if (!alive) return;
@@ -120,13 +130,13 @@ export default function App() {
           const ok = await ingest(local.buf, local.name, 'local');
           if (ok) { setBooting(false); return; }
         }
-        useDemo();
+        loadDemo();
       } catch {
-        if (alive) { useDemo(); flash('فایل همراه برنامه قابل خواندن نبود؛ دادهٔ نمونه نمایش داده شد.'); }
+        if (alive) { loadDemo(); flash('فایل همراه برنامه قابل خواندن نبود؛ دادهٔ نمونه نمایش داده شد.'); }
       }
     })();
     return () => { alive = false; controller.abort(); };
-  }, [ingest, useDemo, flash]);
+  }, [ingest, loadDemo, flash]);
 
   // ---------- ارتفاع نوار بالا (برای چسبندگی صحیح لایه‌ها) ----------
   useLayoutEffect(() => {
@@ -239,7 +249,10 @@ export default function App() {
   const results = useMemo(() => {
     const list = applyFilters(centers, dq, favIds);
     if (sort === 'name') return [...list].sort((a, b) => a.name.localeCompare(b.name, 'fa'));
-    if (sort === 'province') return [...list].sort((a, b) => (a.province + a.city).localeCompare(b.province + b.city, 'fa'));
+    if (sort === 'province') {
+      return [...list].sort((a, b) =>
+        a.province.localeCompare(b.province, 'fa') || a.city.localeCompare(b.city, 'fa') || a.name.localeCompare(b.name, 'fa'));
+    }
     if (tokens.length) return [...list].sort((a, b) => relevance(b, tokens) - relevance(a, tokens));
     return list;
   }, [centers, dq, favIds, sort, tokens]);
@@ -255,9 +268,13 @@ export default function App() {
       provinces: new Set(centers.map((c) => c.province).filter(Boolean)).size,
       cities: new Set(centers.map((c) => c.city).filter(Boolean)).size,
       cats: allCats.length,
+      withPhone: centers.filter((c) => c.phones.length).length,
     }),
     [centers, allCats],
   );
+  /** همهٔ مراکز در یک استان‌اند (فهرست فعلی: تهران)؛ فیلتر و آمار «استان» معنایی ندارد */
+  const soleProvince = stats.provinces === 1 ? centers.find((c) => c.province)?.province ?? '' : '';
+  const scopeText = soleProvince ? `استان ${soleProvince}` : scopeLabel();
 
   useEffect(() => { setLimit(view === 'cards' ? 24 : 50); }, [dq, sort, view]);
 
@@ -370,7 +387,7 @@ export default function App() {
   return (
     <div dir="rtl" className="min-h-screen bg-mist text-ink-900">
       <div className="hidden p-4 text-sm print:block">
-        مراکز طرف قرارداد بیمه بانک سپه — {fmtNum(results.length)} نتیجه
+        مراکز طرف قرارداد بیمه بانک سپه{scopeText && ` — ${scopeText}`} — {fmtNum(results.length)} نتیجه
         {isDemo ? " — دادهٔ نمونه؛ برای مراجعه معتبر نیست" : ` — منبع: ${meta?.fileName || "بدون داده"}`}
       </div>
 
@@ -386,7 +403,7 @@ export default function App() {
             </div>
             <div className="min-w-0 leading-tight">
               <h1 className="truncate text-sm font-extrabold sm:text-base">مراکز طرف قرارداد بیمه بانک سپه</h1>
-              <p className="hidden truncate text-[11px] text-ink-200 sm:block">جستجوی هوشمند مراکز درمانی و خدمات بیمهٔ تکمیلی</p>
+              <p className="hidden truncate text-[11px] text-ink-200 sm:block">جستجوی هوشمند مراکز درمانی و خدمات بیمهٔ تکمیلی{scopeText && ` — ${scopeText}`}</p>
             </div>
           </div>
 
@@ -432,7 +449,7 @@ export default function App() {
         }`}
       >
         <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2.5">
-          <div className="w-full max-w-xl">{searchInput(compactRef, 'جستجو در نام مرکز، شهر، استان یا تلفن...', false)}</div>
+          <div className="w-full max-w-xl">{searchInput(compactRef, soleProvince ? 'جستجو در نام مرکز، خیابان، محله، شهر یا تلفن…' : 'جستجو در نام مرکز، شهر، استان یا تلفن…', false)}</div>
           <p className="hidden shrink-0 whitespace-nowrap text-xs text-slate-500 sm:block">
             <b className="text-base text-ink-800">{fmtNum(results.length)}</b> مرکز
           </p>
@@ -465,7 +482,7 @@ export default function App() {
         <div className="relative mx-auto max-w-4xl px-4 text-center">
           <span className="mb-5 inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-1.5 text-xs text-gold-200 ring-1 ring-inset ring-white/20">
             <Icon name="shield" className="h-3.5 w-3.5" />
-            بیمهٔ تکمیلی درمان • همکاران و بازنشستگان
+            بیمهٔ تکمیلی درمان • همکاران و بازنشستگان{scopeText && <> • <b className="font-bold text-gold-100">{scopeText}</b></>}
           </span>
 
           <h2 className="text-2xl font-extrabold leading-snug sm:text-4xl sm:leading-[1.4]">
@@ -474,10 +491,12 @@ export default function App() {
             را پیدا کنید
           </h2>
           <p className="mx-auto mt-4 max-w-2xl text-sm leading-7 text-ink-100 sm:text-base">
-            نام مرکز، پزشک، شهر، استان، تلفن یا بخشی از آدرس را بنویسید؛ نتایج هم‌زمان با تایپ فیلتر می‌شوند.
+            {soleProvince
+              ? 'نام مرکز، پزشک، خیابان، محله، شهر، تلفن یا بخشی از آدرس را بنویسید؛ نتایج هم‌زمان با تایپ فیلتر می‌شوند.'
+              : 'نام مرکز، پزشک، شهر، استان، تلفن یا بخشی از آدرس را بنویسید؛ نتایج هم‌زمان با تایپ فیلتر می‌شوند.'}
           </p>
 
-          <div className="mx-auto mt-8 max-w-2xl">{searchInput(searchRef, 'مثلاً: بیمارستان رشت، آزمایشگاه شیراز، دندانپزشکی...', true)}</div>
+          <div className="mx-auto mt-8 max-w-2xl">{searchInput(searchRef, DATA_SCOPE?.province === 'تهران' ? 'مثلاً: بیمارستان ونک، داروخانه شهرک غرب، آزمایشگاه شهریار…' : 'مثلاً: بیمارستان، آزمایشگاه، دندانپزشکی…', true)}</div>
 
           {recent.length > 0 && (
             <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs">
@@ -504,7 +523,10 @@ export default function App() {
 
           {hasData && (
             <div className="mx-auto mt-9 grid max-w-2xl grid-cols-2 gap-2.5 sm:grid-cols-4 sm:gap-3">
-              {([['مرکز طرف قرارداد', stats.total], ['استان', stats.provinces], ['شهر', stats.cities], ['دسته‌بندی', stats.cats]] as const).map(
+              {(soleProvince
+                ? [['مرکز طرف قرارداد', stats.total], ['شهر', stats.cities], ['دسته‌بندی', stats.cats], ['دارای تلفن', stats.withPhone]] as const
+                : [['مرکز طرف قرارداد', stats.total], ['استان', stats.provinces], ['شهر', stats.cities], ['دسته‌بندی', stats.cats]] as const
+              ).map(
                 ([l, v]) => (
                   <div key={l} className="rounded-2xl bg-white/10 px-3 py-3.5 ring-1 ring-inset ring-white/15 backdrop-blur-sm">
                     <div className="text-2xl font-extrabold text-gold-300 tabular-nums">{fmtNum(v)}</div>
@@ -674,6 +696,7 @@ export default function App() {
                     cityFacet={cityFacet}
                     kindFacet={kindFacet}
                     favCount={favIds.size}
+                    soleProvince={soleProvince}
                     onPatch={set}
                     onReset={() => setFilters(EMPTY_FILTERS)}
                   />
@@ -705,7 +728,7 @@ export default function App() {
                       >
                         <option value="relevance">{tokens.length ? 'مرتبط‌ترین' : 'ترتیب فایل'}</option>
                         <option value="name">نام (الفبایی)</option>
-                        <option value="province">استان و شهر</option>
+                        <option value="province">{soleProvince ? 'شهر' : 'استان و شهر'}</option>
                       </select>
                       <Icon name="chevron" className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                     </div>
@@ -817,7 +840,7 @@ export default function App() {
                     <table className="w-full min-w-[760px] text-right text-sm">
                       <thead className="sticky bg-slate-50 text-xs text-slate-500" style={{ top: barH + 62 }}>
                         <tr>
-                          {['', 'نام مرکز', 'دسته', 'استان / شهر', 'آدرس', 'تلفن', ''].map((h, i) => (
+                          {['', 'نام مرکز', 'دسته', soleProvince ? 'شهر' : 'استان / شهر', 'آدرس', 'تلفن', ''].map((h, i) => (
                             <th key={i} className="whitespace-nowrap px-3 py-3 font-semibold">{h}</th>
                           ))}
                         </tr>
@@ -840,7 +863,7 @@ export default function App() {
                               </button>
                             </td>
                             <td className="px-3 py-3 text-xs text-slate-600">{c.category}</td>
-                            <td className="px-3 py-3 text-xs">{[c.province, c.city].filter(Boolean).join('، ')}</td>
+                            <td className="px-3 py-3 text-xs">{soleProvince ? c.city || c.province : placeLabel(c)}</td>
                             <td className="max-w-xs px-3 py-3 text-xs leading-6 text-slate-600">
                               <Highlight text={c.address} tokens={tokens} />
                             </td>
@@ -883,7 +906,7 @@ export default function App() {
               <h3 className="mb-4 text-center text-sm font-bold text-ink-900">چطور از این سامانه استفاده کنیم؟</h3>
               <div className="grid gap-4 md:grid-cols-3">
                 {[
-                  ['۱', 'مرکز را پیدا کنید', 'با جستجو یا فیلتر استان، شهر و نوع مرکز، مراکز طرف قرارداد را ببینید.'],
+                  ['۱', 'مرکز را پیدا کنید', `با جستجو یا فیلتر ${soleProvince ? '' : 'استان، '}شهر و نوع مرکز، مراکز طرف قرارداد را ببینید.`],
                   ['۲', 'قبل از مراجعه تماس بگیرید', 'برای اطمینان از ساعت کاری، نوع خدمات و تعهدات، با شمارهٔ درج‌شده هماهنگ کنید.'],
                   ['۳', 'مدارک را همراه داشته باشید', 'کارت ملی و کارت/دفترچهٔ بیمهٔ درمان را همراه ببرید و جزئیات را از مرکز بپرسید.'],
                 ].map(([n, t, d]) => (
@@ -954,6 +977,7 @@ export default function App() {
               cityFacet={cityFacet}
               kindFacet={kindFacet}
               favCount={favIds.size}
+              soleProvince={soleProvince}
               onPatch={set}
               onReset={() => setFilters(EMPTY_FILTERS)}
             />

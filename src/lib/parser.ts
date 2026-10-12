@@ -1,10 +1,11 @@
 import * as XLSX from 'xlsx';
 import { coordinateSanity, parseCoordinates, type Coordinates } from './routing';
+import { clean, fmtNum, norm, parsePhones, phonesFromText, toFa, toLatinDigits, type Phone } from './text';
+import { canonicalProvince, exactProvince, explicitProvince } from './geo';
+import { DATA_SCOPE, canonicalCity, detectScopeCity, isScopeCity, type DataScope } from './scope';
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_SHEET_CELLS = 1_000_000;
-import { clean, norm, parsePhones, phonesFromText, toLatinDigits, type Phone } from './text';
-import { canonicalProvince, detectProvince } from './geo';
 
 export interface Center {
   id: number;
@@ -41,6 +42,27 @@ export interface SheetReport {
 export interface ParseResult {
   centers: Center[];
   report: SheetReport[];
+}
+
+export interface ParseOptions {
+  /**
+   * دامنهٔ جغرافیایی داده؛ پیش‌فرض DATA_SCOPE (استان تهران).
+   * null یعنی فهرست سراسری: استان فقط از ستون/عنوان/نام شیت صریح خوانده می‌شود.
+   */
+  scope?: DataScope | null;
+}
+
+/**
+ * رشتهٔ جستجوی یک مرکز. قالب ثابت است تا بتوان دادهٔ ذخیره‌شدهٔ نسخه‌های قبل را
+ * بدون فایل اصلی بازسازی کرد (ctx = متن سطر عنوانِ بخش در فایل).
+ */
+export function searchIndex(
+  c: Pick<Center, 'name' | 'category' | 'kind' | 'service' | 'province' | 'city' | 'address' | 'phones' | 'discount' | 'desc' | 'extra'>,
+  ctx = '',
+): string {
+  return norm(
+    [c.name, c.category, c.kind, c.service, c.province, c.city, c.address, c.phones.map((p) => p.tel).join(' '), c.discount, c.desc, Object.values(c.extra).join(' '), ctx].join(' '),
+  );
 }
 
 type Field =
@@ -190,7 +212,8 @@ function guessPlan(rows: string[][]): { plan: ColPlan; start: number } {
       return d >= 7 && v.replace(/[\d۰-۹\s\-/،,+]/g, '').length < 4;
     }).length / n;
     const num = vals.filter((v) => /^[\d۰-۹]{1,4}$/.test(v)).length / n;
-    const prov = vals.filter((v) => v.length < 25 && detectProvince(v)).length / n;
+    // فقط مقدارهای «دقیقاً نام استان»؛ ستونی پر از «بزرگراه کردستان»/«خیابان قزوین» ستون استان نیست
+    const prov = vals.filter((v) => v.length < 25 && exactProvince(v)).length / n;
     const avg = vals.reduce((a, v) => a + v.length, 0) / n;
     stats.push({ phone, num, prov, avg, has: vals.length > 0 });
     labels.push(`ستون ${XLSX.utils.encode_col(c)}`);
@@ -224,6 +247,7 @@ function parseSheet(
   ws: XLSX.WorkSheet,
   startId: number,
   hidden: boolean,
+  scope: DataScope | null,
 ): { centers: Center[]; rep: SheetReport } {
   const rep: SheetReport = {
     sheet: sheetName, category: '', rows: 0, imported: 0, headerRow: null,
@@ -302,8 +326,9 @@ function parseSheet(
 
   // ---- sheet-level context ----
   const sheetN = norm(sheetName);
-  const sheetProvince = detectProvince(sheetName);
-  const sheetIsProvince = !!sheetProvince && norm(sheetProvince) === sheetN.replace(/^استان /, '');
+  // فقط نام صریح («تهران»، «استان تهران»، «مراکز استان تهران»)؛ «داروخانه‌های البرز» استان نیست
+  const sheetProvince = explicitProvince(sheetName);
+  const sheetIsProvince = !!exactProvince(sheetName);
   const generic = GENERIC_SHEET.test(sheetN);
   const sheetKind = inferKind(sheetName);
 
@@ -334,6 +359,15 @@ function parseSheet(
   let noName = 0;
   let suspiciousCoords = 0;
   const suspiciousRows: number[] = [];
+  // دامنهٔ داده (استان تهران)
+  let provinceConflicts = 0;
+  const conflictSamples = new Set<string>();
+  let cityFromAddress = 0;
+  const citySamples = new Set<string>();
+  let cityDefaulted = 0;
+  let unknownCities = 0;
+  const unknownCitySamples = new Set<string>();
+  let areaCodeAdded = 0;
 
   const nextNonEmpty = (from: number) => {
     for (let j = from; j < rows.length; j++) if (rows[j].some(Boolean)) return rows[j];
@@ -375,7 +409,8 @@ function parseSheet(
       const nextIsHeader = nx ? fieldSet(nx).size >= 2 : false;
       const pm = text.match(/^استان\s*[:：]?\s*(.+)$/);
       const cm = text.match(/^(?:شهر|شهرستان)\s*[:：]?\s*(.+)$/);
-      const provDetected = text.length < 30 ? detectProvince(text) : '';
+      // فقط عنوان صریح («تهران»، «استان تهران»، «مراکز استان تهران»)؛ «داروخانه البرز» یک مرکز است، نه عنوان استان
+      const provDetected = text.length < 40 ? explicitProvince(text) : '';
       const treatAsSection =
         st.count >= 2 || // merged horizontally
         pm || cm || provDetected ||
@@ -385,11 +420,10 @@ function parseSheet(
         if (pm || (provDetected && !cm)) { ctxCity = ''; lastCity = ''; lastProv = ''; }
         if (pm) ctxProv = canonicalProvince(pm[1]);
         else if (cm) ctxCity = clean(cm[1]);
-        else if (provDetected && norm(provDetected) === n.replace(/^استان /, '')) ctxProv = provDetected;
-        else ctxSection = text;
-        if (!(provDetected || pm || cm)) {
-          // a new section label resets ctx city (sub-grouping)
-        }
+        else if (provDetected) {
+          ctxProv = provDetected;
+          if (!exactProvince(text)) ctxSection = text; // «مراکز طرف قرارداد استان تهران» زمینهٔ دسته هم هست
+        } else ctxSection = text;
         sectionRows++;
         if (rep.skipped.length < 40) rep.skipped.push({ row: excelRow, reason: 'سطر عنوان/گروه‌بندی', text });
         continue;
@@ -418,9 +452,14 @@ function parseSheet(
     });
 
     const address = get('address');
-    let phoneRaw = get('phone');
-    let phones = parsePhones(phoneRaw);
-    if (!phones.length && address) phones = phonesFromText(address);
+    const phoneRaw = get('phone');
+    const areaCode = scope?.areaCode ?? '';
+    let phones = parsePhones(phoneRaw, areaCode);
+    if (areaCode && phones.length) {
+      const plain = parsePhones(phoneRaw);
+      areaCodeAdded += phones.filter((p, i) => plain[i] && plain[i].tel !== p.tel && p.tel.startsWith(areaCode)).length;
+    }
+    if (!phones.length && address) phones = phonesFromText(address, areaCode);
 
     if (/^جمع(?: کل)?(?:\s|$)/.test(norm(name))) {
       if (rep.skipped.length < 40) rep.skipped.push({ row: excelRow, reason: 'سطر جمع', text: name });
@@ -445,14 +484,42 @@ function parseSheet(
       province = lastProv;
       fillDown++;
     }
+    let cityFilled = false;
     if (city) lastCity = city;
     else if (ctxCity) city = ctxCity;
     else if (lastCity && currentFields.includes('city')) {
       city = lastCity;
+      cityFilled = true;
       fillDown++;
     }
-    if (!province) province = detectProvince(ctxSection) || detectProvince(address.slice(0, 35));
+    if (!province) province = explicitProvince(ctxSection);
     if (!province && sheetProvince) province = sheetProvince;
+    // ⚠️ آدرس هرگز استان را تعیین نمی‌کند: «بزرگراه کردستان»، «خیابان قزوین»، «خلیج فارس»،
+    // «شهرک گلستان»، «جادهٔ قدیم قم» همه در تهران‌اند. (باگ نسخهٔ قبل: detectProvince(address))
+    if (scope) {
+      if (province && norm(province) !== norm(scope.province)) {
+        provinceConflicts++;
+        if (conflictSamples.size < 3) conflictSamples.add(province);
+      }
+      province = scope.province;
+      // شهر صریحِ ابتدای آدرس («شهریار، …») از حدسِ پرکردن رو به پایین معتبرتر است، نه از ستون صریح
+      const detected = !city || cityFilled ? detectScopeCity(address, scope) : '';
+      if (detected && (!city || canonicalCity(city, scope) !== detected)) {
+        if (cityFilled) fillDown--;
+        city = detected;
+        cityFromAddress++;
+        if (citySamples.size < 4) citySamples.add(detected);
+      } else if (city) {
+        city = canonicalCity(city, scope);
+        if (!isScopeCity(city, scope)) {
+          unknownCities++;
+          if (unknownCitySamples.size < 3) unknownCitySamples.add(city);
+        }
+      } else {
+        city = scope.defaultCity;
+        cityDefaulted++;
+      }
+    }
 
     const kind = get('kind');
     const service = get('service');
@@ -478,15 +545,11 @@ function parseSheet(
     if (seen.has(dupKey)) dups++;
     else seen.add(dupKey);
 
-    const extraVals = Object.values(extra).join(' ');
-    const searchStr = norm(
-      [name, category, kind, service, province, city, address, phones.map((p) => p.tel).join(' '), discount, desc, extraVals, ctxSection].join(' '),
-    );
+    const fields = { name, category, kind, service, province, city, address, phones, discount, desc, extra };
     centers.push({
       id: startId + centers.length,
-      coordinates, name, category, sheet: sheetName, province, city, address, phones,
-      kind, service, discount, desc, extra,
-      search: searchStr,
+      coordinates, ...fields, sheet: sheetName,
+      search: searchIndex(fields, ctxSection),
       nameN: norm(name),
       locN: norm(`${province} ${city}`),
       catN: norm(`${category} ${kind} ${service}`),
@@ -495,18 +558,29 @@ function parseSheet(
 
   rep.imported = centers.length;
   rep.category = generic || sheetIsProvince ? 'بر اساس نوع مرکز' : clean(sheetName);
-  if (sectionRows) rep.notes.push(`${sectionRows} سطر عنوان/گروه‌بندی شناسایی و به‌عنوان زمینه (استان/دسته) استفاده شد.`);
-  if (repeated) rep.notes.push(`${repeated} هدر تکراری در میانه‌ی شیت شناسایی شد.`);
-  if (fillDown) rep.notes.push(`${fillDown} خانه‌ی خالی استان/شهر از ردیف‌های بالاتر تکمیل شد.`);
-  if (noName) rep.notes.push(`${noName} ردیف بدون «نام» بود و از ستون‌های دیگر نام‌گذاری شد.`);
-  if (dups) rep.notes.push(`${dups} ردیف تکراری (نام+آدرس+تلفن یکسان) وجود دارد (حذف نشد).`);
-  if (suspiciousCoords) rep.notes.push(`مختصات ${suspiciousCoords} ردیف با نقشهٔ ایران هم‌خوان نیست (بیرون ایران، صفر، یا جابه‌جایی احتمالی عرض/طول — نمونه سطر: ${suspiciousRows.join('، ')}${suspiciousCoords > suspiciousRows.length ? '، …' : ''})؛ داده نگه داشته شد و در پنجرهٔ مسیریابی هشدار داده می‌شود.`);
-  if (sheetIsProvince) rep.notes.push(`نام شیت به‌عنوان استان «${sheetProvince}» شناخته شد.`);
+  const fa = (v: number) => fmtNum(v);
+  const samples = (s: Set<string>) => [...s].map((x) => `«${x}»`).join('، ');
+  if (scope && centers.length) {
+    rep.notes.push(`استان همهٔ ${fa(centers.length)} مرکز «${scope.province}» ثبت شد (دامنهٔ داده). نام استان از آدرس حدس زده نمی‌شود؛ «بزرگراه کردستان» یا «خیابان قزوین» نام خیابان‌اند، نه استان.`);
+    if (provinceConflicts) rep.notes.push(`در ${fa(provinceConflicts)} ردیف، ستون/عنوانِ استان مقدار دیگری داشت (${samples(conflictSamples)})؛ طبق دامنهٔ داده «${scope.province}» ثبت شد. اگر این فایل واقعاً سراسری است، DATA_SCOPE را در src/lib/scope.ts بردارید.`);
+    if (cityFromAddress) rep.notes.push(`شهر ${fa(cityFromAddress)} مرکز از ابتدای آدرس تشخیص داده شد (${samples(citySamples)}).`);
+    if (cityDefaulted) rep.notes.push(`${fa(cityDefaulted)} مرکز ستون شهر نداشت و آدرسشان با نام شهر دیگری از استان شروع نمی‌شد؛ شهر «${scope.defaultCity}» در نظر گرفته شد.`);
+    if (unknownCities) rep.notes.push(`شهرِ ${fa(unknownCities)} مرکز در فهرست شهرهای استان ${scope.province} نیست (${samples(unknownCitySamples)})؛ اگر نام محله یا منطقه است مشکلی نیست، وگرنه ستون «شهر» فایل را بررسی کنید.`);
+    if (areaCodeAdded) rep.notes.push(`پیش‌شمارهٔ ${toFa(scope.areaCode)} به ${fa(areaCodeAdded)} شمارهٔ ثابت بدون کد افزوده شد تا دکمهٔ «تماس» از تلفن همراه هم کار کند.`);
+  }
+  if (sectionRows) rep.notes.push(`${fa(sectionRows)} سطر عنوان/گروه‌بندی شناسایی و به‌عنوان زمینه (استان/دسته) استفاده شد.`);
+  if (repeated) rep.notes.push(`${fa(repeated)} هدر تکراری در میانه‌ی شیت شناسایی شد.`);
+  if (fillDown) rep.notes.push(`${fa(fillDown)} خانه‌ی خالی استان/شهر از ردیف‌های بالاتر تکمیل شد.`);
+  if (noName) rep.notes.push(`${fa(noName)} ردیف بدون «نام» بود و از ستون‌های دیگر نام‌گذاری شد.`);
+  if (dups) rep.notes.push(`${fa(dups)} ردیف تکراری (نام+آدرس+تلفن یکسان) وجود دارد (حذف نشد).`);
+  if (suspiciousCoords) rep.notes.push(`مختصات ${fa(suspiciousCoords)} ردیف با نقشهٔ ایران هم‌خوان نیست (بیرون ایران، صفر، یا جابه‌جایی احتمالی عرض/طول — نمونه سطر: ${suspiciousRows.join('، ')}${suspiciousCoords > suspiciousRows.length ? '، …' : ''})؛ داده نگه داشته شد و در پنجرهٔ مسیریابی هشدار داده می‌شود.`);
+  if (sheetIsProvince && !scope) rep.notes.push(`نام شیت به‌عنوان استان «${sheetProvince}» شناخته شد.`);
   if (centers.length === 0) rep.notes.push('هیچ مرکزی از این شیت استخراج نشد.');
   return { centers, rep };
 }
 
-export function parseWorkbook(buf: ArrayBuffer): ParseResult {
+export function parseWorkbook(buf: ArrayBuffer, options: ParseOptions = {}): ParseResult {
+  const scope = options.scope === undefined ? DATA_SCOPE : options.scope;
   if (!buf.byteLength || buf.byteLength > MAX_FILE_BYTES) throw new Error('فایل باید غیرخالی و حداکثر ۲۰ مگابایت باشد');
   const signature = new Uint8Array(buf, 0, Math.min(buf.byteLength, 2));
   const binary = (signature[0] === 0x50 && signature[1] === 0x4b) || (signature[0] === 0xd0 && signature[1] === 0xcf);
@@ -517,7 +591,7 @@ export function parseWorkbook(buf: ArrayBuffer): ParseResult {
     const ws = wb.Sheets[name];
     const hidden = !!(wb.Workbook?.Sheets?.[i]?.Hidden);
     try {
-      const { centers, rep } = parseSheet(name, ws, all.length, hidden);
+      const { centers, rep } = parseSheet(name, ws, all.length, hidden, scope);
       all.push(...centers);
       report.push(rep);
     } catch (e) {

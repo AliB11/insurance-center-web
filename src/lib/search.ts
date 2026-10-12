@@ -15,8 +15,22 @@ export const EMPTY_FILTERS: Filters = {
   q: '', category: '', province: '', city: '', kind: '', hasPhone: false, favOnly: false,
 };
 
+/**
+ * نوع معبر در جستجو اختیاری است: «اتوبان کردستان» باید «بزرگراه کردستان» را پیدا کند و
+ * «خیابان ولیعصر» مرکزی را که آدرسش فقط «ولیعصر، …» است. (به‌صورت نرمال‌شده)
+ */
+const STREET_TYPE_TOKENS = new Set(['خیابان', 'بلوار', 'میدان', 'بزرگراه', 'اتوبان', 'ازادراه', 'کوچه', 'جاده', 'کوی', 'چهارراه', 'فلکه']);
+
 export function tokensOf(q: string): string[] {
-  return norm(q).split(' ').filter(Boolean);
+  const toks = norm(q).split(' ').filter(Boolean);
+  const meaningful = toks.filter((t) => !STREET_TYPE_TOKENS.has(t));
+  // «کوچه ۱۲» را به «۱۲» تقلیل نده: عدد تنها تقریباً با همه‌چیز جور است
+  return meaningful.some((t) => !/^\d+$/.test(t)) ? meaningful : toks;
+}
+
+/** محل مرکز بدون تکرار: «تهران» (نه «تهران، تهران») یا «تهران، شهریار». */
+export function placeLabel(c: Pick<Center, 'province' | 'city'>): string {
+  return [...new Set([c.province, c.city].map((x) => x.trim()).filter(Boolean))].join('، ');
 }
 
 export function applyFilters(

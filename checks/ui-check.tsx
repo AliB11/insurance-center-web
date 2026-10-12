@@ -5,6 +5,8 @@
  */
 import { JSDOM } from 'jsdom';
 import { createElement } from 'react';
+import { demoCenters } from '../src/lib/demo';
+import { toFa } from '../src/lib/text';
 
 const dom = new JSDOM('<!doctype html><html lang="fa" dir="rtl"><body><div id="root"></div></body></html>', {
   url: 'http://localhost/',
@@ -78,7 +80,9 @@ async function main() {
   must('بنر نمونه (Demo) نمایش داده می‌شود', text().includes('نمونهٔ نمایشی'));
   must('کارت‌های مرکز رندر شدند: ' + count('article'), count('article') === 24);
   must('کاشی دسته‌بندی ساخته شد: ' + count('section button'), count('section button') > 5);
-  must('آمار استان‌ها در بنر هست', text().includes('استان'));
+  must('دامنهٔ «استان تهران» در بنر و سربرگ هست', text().includes('استان تهران'));
+  must('کاشی‌های آمار: شهر و «دارای تلفن» (به‌جای شمارش بی‌معنای یک استان)', text().includes('دارای تلفن') && !/[۰-۹]+استان(?!\s)/.test(text()));
+  must('کارت محل تکراری «تهران، تهران» ندارد', !text().includes('تهران، تهران'));
   must('موج انتهای بنر رندر شده', count('svg[viewBox="0 0 1440 120"]') === 1);
   must('نوار جستجوی چسبان وجود دارد', count('[role="search"]') === 2);
   must('نتایج: «مرکز یافت شد» در صفحه است', text().includes('مرکز یافت شد'));
@@ -87,12 +91,12 @@ async function main() {
   const input = dom.window.document.querySelectorAll<HTMLInputElement>('input[role="search"], form[role="search"] input')[0];
   const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value')!.set!;
   await act(async () => {
-    setter.call(input, 'بیمارستان رشت');
+    setter.call(input, 'بیمارستان پاسداران');
     input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   });
   await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
   must('جستجو نتایج را فیلتر کرد: ' + count('article'), count('article') < 24 && count('article') >= 1);
-  must('چیپ عبارت جستجو ظاهر شد', text().includes('«بیمارستان رشت»'));
+  must('چیپ عبارت جستجو ظاهر شد', text().includes('«بیمارستان پاسداران»'));
   must('هایلایت نتایج ساخته شد: ' + count('mark'), count('mark') > 0);
 
   // ----- تعامل ۲: پاک کردن جستجو با دکمهٔ ضربدر -----
@@ -108,7 +112,8 @@ async function main() {
   await act(async () => { catBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
   const counter = dom.window.document.querySelector('section b.tabular-nums, section b.text-lg') as HTMLElement;
-  must('شمارندهٔ نتایج بعد از فیلتر دستهٔ داروخانه = ۲۸: ' + counter?.textContent, counter?.textContent === '۲۸');
+  const pharmacies = toFa(demoCenters().filter((c) => c.category === 'داروخانه').length);
+  must(`شمارندهٔ نتایج بعد از فیلتر دستهٔ داروخانه = ${pharmacies}: ` + counter?.textContent, counter?.textContent === pharmacies);
   must('چیپ فیلتر فعال نشان داده شد: ' + count('button.rounded-full.bg-ink-100'), count('button.rounded-full.bg-ink-100') === 1);
   must('فیلتر دسته اعمال شد و کارت‌ها رندر شدند: ' + count('article'), count('article') === 24);
 
@@ -133,7 +138,8 @@ async function main() {
   must('مودال مسیریابی باز شد', !!dlg);
   must('برای مرکز نمونه لینک نشان ساخته می‌شود (مختصات تقریبی شهر)', /href="https:\/\/nshn\.ir\/\?lat=3/.test(dlg.innerHTML));
   must('متن توضیح دادهٔ نمونه به تقریبی‌بودن مختصات اشاره می‌کند', (dlg.textContent || '').includes('تقریبی'));
-  must('لینک iOS در سربرگ جدید باز می‌شود', Array.from(dlg.querySelectorAll('a[href^="nshn://"]')).every((a) => a.getAttribute('target') === '_blank'));
+  const iosLinks = Array.from(dlg.querySelectorAll('a[href^="neshan://"]'));
+  must('لینک iOS (neshan://) هست و در سربرگ جدید باز می‌شود', iosLinks.length > 0 && iosLinks.every((a) => a.getAttribute('target') === '_blank'));
   must('دکمهٔ کپی لینک نشان برای ارسال به گوشی هست', (dlg.textContent || '').includes('کپی لینک نشان'));
   const detailsEl = dlg.querySelector('details') as HTMLDetailsElement;
   await act(async () => { detailsEl.open = true; }); // jsdom روی کلیک summary همیشه toggle نمی‌کند

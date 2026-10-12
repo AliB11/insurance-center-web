@@ -9,6 +9,8 @@ interface Props {
   cityFacet: [string, number][];
   kindFacet: [string, number][];
   favCount: number;
+  /** همهٔ مراکز در همین استان‌اند (فهرست فعلی: تهران)؛ به‌جای فیلتر بی‌اثرِ استان، توضیح نشان داده می‌شود */
+  soleProvince?: string;
   onPatch: (patch: Partial<Filters>) => void;
   onReset: () => void;
 }
@@ -105,20 +107,29 @@ function Toggle({
   );
 }
 
-export function FilterPanel({ filters, catFacet, provFacet, cityFacet, kindFacet, favCount, onPatch, onReset }: Props) {
+export function FilterPanel({ filters, catFacet, provFacet, cityFacet, kindFacet, favCount, soleProvince, onPatch, onReset }: Props) {
   const dirty =
     !!filters.category || !!filters.province || !!filters.city || !!filters.kind || filters.hasPhone || filters.favOnly || !!filters.q;
 
   return (
     <div className="space-y-4">
       <SelectField label="دسته / نوع مرکز" icon="layers" value={filters.category} onChange={(v) => onPatch({ category: v })} options={catFacet} />
-      <SelectField
-        label="استان"
-        icon="pin"
-        value={filters.province}
-        onChange={(v) => onPatch({ province: v, city: '' })}
-        options={provFacet}
-      />
+      {soleProvince && !filters.province ? (
+        <p className="flex items-start gap-2 rounded-xl bg-ink-50/70 px-3 py-2.5 text-xs leading-6 text-ink-700 ring-1 ring-inset ring-ink-100">
+          <Icon name="pin" className="mt-1 h-3.5 w-3.5 shrink-0 text-ink-400" />
+          <span>
+            همهٔ مراکز این فهرست در <b className="font-bold">استان {soleProvince}</b> هستند؛ برای محدود کردن، شهر را انتخاب کنید.
+          </span>
+        </p>
+      ) : (
+        <SelectField
+          label="استان"
+          icon="pin"
+          value={filters.province}
+          onChange={(v) => onPatch({ province: v, city: '' })}
+          options={provFacet}
+        />
+      )}
       <SelectField
         label="شهر"
         icon="pin"

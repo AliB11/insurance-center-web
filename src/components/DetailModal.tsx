@@ -1,5 +1,5 @@
 import type { Center } from '../lib/parser';
-import { categoryEmoji } from '../lib/search';
+import { categoryEmoji, placeLabel } from '../lib/search';
 import { catTheme } from '../lib/theme';
 import { toFa } from '../lib/text';
 import { Modal } from './Modal';
@@ -27,7 +27,7 @@ export function DetailModal({ c, fav, onFav, onClose, onCopy, onRoute }: Props) 
     ...Object.entries(c.extra),
   ];
   const visible = rows.filter(([k, v]) => v && !(k === 'نوع مرکز' && v === c.category));
-  const text = [c.name, [c.province, c.city].filter(Boolean).join('، '), c.address, c.phones.map((p) => p.label).join(' / ')]
+  const text = [c.name, placeLabel(c), c.address, c.phones.map((p) => p.label).join(' / ')]
     .filter(Boolean)
     .join('\n');
   const theme = catTheme(c.category, c.kind);
@@ -56,7 +56,7 @@ export function DetailModal({ c, fav, onFav, onClose, onCopy, onRoute }: Props) 
             {(c.province || c.city) && (
               <p className="mt-1 flex items-center gap-1.5 text-xs text-ink-200">
                 <Icon name="pin" className="h-3.5 w-3.5 text-gold-300" />
-                {[c.province, c.city].filter(Boolean).join('، ')}
+                {placeLabel(c)}
               </p>
             )}
           </div>

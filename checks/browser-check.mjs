@@ -19,17 +19,20 @@ const dataset = XLSX.utils.book_new();
 XLSX.utils.book_append_sheet(dataset, XLSX.utils.aoa_to_sheet([
   ['نام مرکز', 'استان', 'شهر', 'آدرس', 'تلفن', 'latitude', 'longitude'],
   ['مرکز تست مسیریابی', 'تهران', 'تهران', 'خیابان آزمایشی', '02112345678', 35.7, 51.4],
-  ['مرکز بدون مختصات', 'فارس', 'شیراز', 'خیابان زند', '07112345678', '', ''],
+  ['مرکز بدون مختصات', '', '', 'بزرگراه کردستان، خیابان ۶۴ غربی', '88776655', '', ''],
 ]), 'مراکز');
 const fixture = { name: 'centers.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: XLSX.write(dataset, { type: 'buffer', bookType: 'xlsx' }) };
+const faNumber = (text) => Number(String(text).replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[,٬]/g, ''));
 const openImport = async () => { await page.getByRole('button', { name: /بارگذاری اکسل|بارگذاری فایل/ }).first().click(); };
 try {
   await page.goto(base);
   await page.locator('article').first().waitFor();
   assert.equal(await page.locator('article').count(), 24); pass('desktop boots with 24 demo cards');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true); pass('desktop has no horizontal overflow');
+  const total = faNumber((await page.locator('body').innerText()).match(/([۰-۹٬,]+)\s*مرکز یافت شد/)?.[1] ?? '0');
+  assert.ok(total > 100, `demo total ${total}`);
   await page.evaluate(() => dispatchEvent(new Event('beforeprint')));
-  assert.equal(await page.locator('article').count(), 177);
+  assert.equal(await page.locator('article').count(), total);
   await page.evaluate(() => dispatchEvent(new Event('afterprint')));
   await page.waitForFunction(() => document.querySelectorAll('article').length === 24); pass('print includes all filtered rows and restores pagination');
   await page.locator('article').first().getByRole('button', { name: 'مسیریابی', exact: true }).click();
@@ -66,6 +69,10 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('article').length === 2);
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('article').count(), 2); pass('XLSX upload imports real rows');
+  const second = page.locator('article').nth(1);
+  assert.ok(await second.locator('a[href="tel:02188776655"]').count() > 0);
+  assert.equal((await second.locator('p b.font-semibold').first().innerText()).trim(), 'تهران —');
+  pass('«بزرگراه کردستان» stays a street: province Tehran, phone gains 021');
   await page.reload();
   await page.locator('article').first().waitFor();
   assert.equal(await page.locator('article').count(), 2); pass('IndexedDB data survives reload');
@@ -83,12 +90,23 @@ try {
   assert.match(await dialog.innerText(), /این مرکز مختصات ندارد/);
   assert.equal(await dialog.locator('a[href*="nshn.ir"]').count(), 0);
   assert.match(await dialog.innerText(), /تبدیل آدرس به مختصات/);
-  await page.route('**nominatim.openstreetmap.org/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([{ lat: '29.59', lon: '52.58', display_name: 'فارس، شیراز، خیابان زند', address: { city: 'شیراز', state: 'فارس' } }]), headers: { 'access-control-allow-origin': '*' } }));
+  const osmCalls = [];
+  await page.route('**nominatim.openstreetmap.org/**', (route) => {
+    osmCalls.push(route.request().url());
+    return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify([
+      { lat: '35.31', lon: '47.0', display_name: 'بلوار کردستان، سنندج، استان کردستان', address: { city: 'سنندج', state: 'استان کردستان' } },
+      { lat: '35.745', lon: '51.4', display_name: 'بزرگراه کردستان، تهران، استان تهران', address: { city: 'تهران', state: 'استان تهران' } },
+    ]) });
+  });
   await dialog.getByRole('button', { name: /جستجو با نقشهٔ آزاد OSM/ }).click();
+  await dialog.getByRole('button', { name: 'تأیید و استفاده از این نقطه' }).waitFor();
+  assert.match(await dialog.innerText(), /بیرون از محدودهٔ استان تهران/);
+  assert.equal(await dialog.getByRole('button', { name: 'تأیید و استفاده از این نقطه' }).count(), 1);
+  assert.equal(new URL(osmCalls[0]).searchParams.get('bounded'), '1');
   await dialog.getByRole('button', { name: 'تأیید و استفاده از این نقطه' }).click();
-  assert.equal(await dialog.locator('a[href*="nshn.ir"]').first().getAttribute('href'), 'https://nshn.ir/?lat=29.59&lng=52.58');
+  assert.equal(await dialog.locator('a[href*="nshn.ir"]').first().getAttribute('href'), 'https://nshn.ir/?lat=35.745&lng=51.4');
   assert.match(await dialog.innerText(), /تأییدشده از جستجوی آدرس/);
-  pass('unlocated center gains a confirmed point only through the vetted candidate flow');
+  pass('unlocated center gains a confirmed point only through the vetted, Tehran-bounded candidate flow');
   await page.keyboard.press('Escape');
 
   await openImport();
@@ -143,5 +161,57 @@ try {
   await corruptPage.locator('article').first().waitFor();
   assert.equal(await corruptPage.locator('article').count(), 24); pass('corrupt bundled workbook and malformed recent searches fall back without crashing');
   await isolated.close();
+
+  // دادهٔ ذخیره‌شده توسط نسخهٔ قبلی (استان از نام بزرگراه/خیابان) باید هنگام ورود اصلاح شود
+  const legacyContext = await browser.newContext();
+  const legacyPage = await legacyContext.newPage();
+  legacyPage.on('pageerror', (error) => errors.push(error.message));
+  await legacyPage.goto(base);
+  await legacyPage.locator('article').first().waitFor();
+  const legacyCenter = (id, name, province, address, phone, tel) => ({
+    id, name, category: 'مراکز', sheet: 'مراکز', province, city: '', address, phones: [{ label: phone, tel }],
+    kind: '', service: '', discount: '', desc: '', extra: {}, search: `${name} ${province} ${address} ${tel}`,
+    nameN: name, locN: province, catN: 'مراکز',
+  });
+  await legacyPage.evaluate((legacy) => new Promise((resolve, reject) => {
+    const request = indexedDB.open('sepah-insurance-centers', 1);
+    request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains('kv')) request.result.createObjectStore('kv'); };
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const tx = request.result.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(legacy, 'dataset');
+      tx.oncomplete = () => { request.result.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }), {
+    centers: [
+      legacyCenter(0, 'بیمارستان قدیمی الف', 'کردستان', 'بزرگراه کردستان، خیابان ۶۴', '88776655', '88776655'),
+      legacyCenter(1, 'آزمایشگاه قدیمی ب', 'قزوین', 'خیابان قزوین، پلاک ۲', '021-66927008-10', '0216692700810'),
+    ],
+    report: [{ sheet: 'مراکز', category: 'مراکز', rows: 2, imported: 2, headerRow: 0, notes: [], mapping: [], skipped: [] }],
+    meta: { fileName: 'old.xlsx', source: 'upload', loadedAt: 1, size: 10 },
+  });
+  await legacyPage.reload();
+  await legacyPage.waitForFunction(() => document.querySelectorAll('article').length === 2);
+  await legacyPage.getByText(/دادهٔ ذخیره‌شده به‌روز شد: استان ۲ مرکز به «تهران» اصلاح شد/).waitFor();
+  assert.ok(await legacyPage.locator('a[href="tel:02188776655"]').count() > 0);
+  assert.ok(await legacyPage.locator('a[href="tel:02166927008"]').count() > 0);
+  assert.match(await legacyPage.locator('body').innerText(), /استان تهران/);
+  await legacyPage.locator('article').first().click();
+  const legacyDetail = await legacyPage.getByRole('dialog').innerText();
+  assert.match(legacyDetail, /استان\s*تهران/);
+  assert.doesNotMatch(legacyDetail, /استان\s*(کردستان|قزوین)/);
+  await legacyPage.keyboard.press('Escape');
+  const storedSchema = await legacyPage.evaluate(() => new Promise((resolve) => {
+    const request = indexedDB.open('sepah-insurance-centers', 1);
+    request.onsuccess = () => {
+      const get = request.result.transaction('kv').objectStore('kv').get('dataset');
+      get.onsuccess = () => { resolve([get.result?.meta?.schema, get.result?.centers?.map((c) => c.province)]); request.result.close(); };
+    };
+  }));
+  assert.deepEqual(storedSchema, [2, ['تهران', 'تهران']]);
+  pass('previous-version data with street-derived provinces is repaired on load and re-saved');
+  await legacyContext.close();
+  assert.deepEqual(errors, []);
   console.log(`\n${checks} browser checks passed (${base})`);
 } finally { await browser.close(); }
