@@ -8,11 +8,16 @@
  *    dataset has other located centers in the same city) it must be near them.
  *    A same-named street in another city (the classic «خیابان کمیل» trap) is
  *    rejected outright; ambiguous answers stay human-confirmed.
+ *  • data scope (src/lib/scope.ts): every center is in Tehran province, and many
+ *    Tehran streets carry other provinces' names («بزرگراه کردستان»، «خیابان قزوین»).
+ *    OSM search is bounded to the province box and any answer outside that box
+ *    is rejected, so «کردستان» can never route a user to Sanandaj.
  *  • the Neshan web key is optional, supplied by the user, stored in this
  *    browser only, and sent to api.neshan.org and nowhere else.
  */
 import { clean, norm } from './text';
 import { coordinateSanity, distanceKm, validCoordinates, type Coordinates } from './routing';
+import { DATA_SCOPE, inScopeBox, type DataScope } from './scope';
 
 export type GeoSource = 'neshan' | 'nominatim';
 
@@ -51,7 +56,9 @@ interface RawHit {
   unmatched?: string;
 }
 
-const FETCH_TIMEOUT_MS = 12_000;
+/** Request budget; mutable only so the regression checks don't have to wait 12 seconds. */
+export const geoConfig = { timeoutMs: 12_000 };
+const TIMEOUT_MESSAGE = 'پاسخی از سرویس در ۱۲ ثانیه نرسید؛ اتصال شبکه را بررسی و دوباره امتحان کنید.';
 const MAX_BODY_CHARS = 400_000;
 /** Peer-distance thresholds in km: beyond `reject` the answer belongs to another settlement. */
 const PEER_REJECT_KM = 80;
@@ -64,10 +71,16 @@ export function nominatimQuery(t: GeoTarget): string {
   return clean([t.name, t.city, t.address].filter(Boolean).join(' '));
 }
 
+/**
+ * Throws `ABORT` only when the *caller* cancelled (modal closed / new lookup) and `TIMEOUT`
+ * when our own budget ran out. Previously both surfaced as an abort, so a slow network left
+ * the routing modal spinning forever (the UI deliberately ignores ABORT).
+ */
 async function getJson(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<unknown> {
   const controller = new AbortController();
+  let timedOut = false;
   const abort = () => controller.abort();
-  const timer = setTimeout(abort, FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, geoConfig.timeoutMs);
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
   try {
@@ -76,6 +89,10 @@ async function getJson(url: string, headers: Record<string, string>, signal?: Ab
     const text = await response.text();
     if (!text || text.length > MAX_BODY_CHARS) throw new Error('HTTP:0');
     return JSON.parse(text);
+  } catch (error) {
+    if (signal?.aborted) throw new Error('ABORT');
+    if (timedOut) throw new Error('TIMEOUT');
+    throw error;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
@@ -166,21 +183,37 @@ export async function searchWithNeshan(t: GeoTarget, key: string, signal?: Abort
     return parseNeshanGeocode(json);
   } catch (error) {
     const message = String((error as Error)?.message ?? '');
+    if (message === 'ABORT') throw error;
+    if (message === 'TIMEOUT') throw new Error(TIMEOUT_MESSAGE);
     const status = /^HTTP:(\d+)$/.exec(message)?.[1] ?? '0';
-    throw new Error(status === '0' && message.includes('abort') ? 'ABORT' : neshanErrorMessage(status));
+    throw new Error(neshanErrorMessage(status));
   }
 }
 
-export async function searchWithNominatim(t: GeoTarget, signal?: AbortSignal): Promise<RawHit[]> {
+/** Scope applies when the target sits in the scope province (always, for the Tehran list). */
+function targetScope(t: GeoTarget, scope: DataScope | null): DataScope | null {
+  if (!scope) return null;
+  const want = norm(t.province.replace(/^استان\s*/, ''));
+  return !want || want === norm(scope.province) ? scope : null;
+}
+
+export async function searchWithNominatim(t: GeoTarget, signal?: AbortSignal, scope: DataScope | null = DATA_SCOPE): Promise<RawHit[]> {
   const params = new URLSearchParams({
     format: 'jsonv2', limit: '3', countrycodes: 'ir', 'accept-language': 'fa', q: nominatimQuery(t),
   });
+  const bounds = targetScope(t, scope)?.box;
+  if (bounds) {
+    // viewbox = left,top,right,bottom; bounded=1 keeps «بزرگراه کردستان» inside Tehran province
+    params.set('viewbox', [bounds.minLng, bounds.maxLat, bounds.maxLng, bounds.minLat].join(','));
+    params.set('bounded', '1');
+  }
   try {
     const json = await getJson(`https://nominatim.openstreetmap.org/search?${params}`, { 'Accept': 'application/json' }, signal);
     return parseNominatimHits(json);
   } catch (error) {
     const message = String((error as Error)?.message ?? '');
-    if (message.includes('abort')) throw new Error('ABORT');
+    if (message === 'ABORT') throw error;
+    if (message === 'TIMEOUT') throw new Error(TIMEOUT_MESSAGE);
     throw new Error('اتصال به نقشهٔ آزاد (OSM) برقرار نشد؛ اتصال شبکه را بررسی کنید.');
   }
 }
@@ -201,9 +234,10 @@ export function peerAnchors(centers: { city: string; coordinates?: Coordinates }
  * Pure vetting step: every provider answer passes here before reaching the UI.
  * Rejection reasons are surfaced to the user; accepted points still need one human click.
  */
-export function vetHits(hits: RawHit[], t: GeoTarget, peers: Coordinates[], source: GeoSource): GeoCandidate[] {
+export function vetHits(hits: RawHit[], t: GeoTarget, peers: Coordinates[], source: GeoSource, scope: DataScope | null = DATA_SCOPE): GeoCandidate[] {
   const wantCity = t.city ? norm(t.city) : '';
   const wantProvince = t.province ? norm(t.province.replace(/^استان\s*/, '')) : '';
+  const box = targetScope(t, scope);
   return hits.map((hit) => {
     const point: Coordinates = { lat: hit.lat, lng: hit.lng };
     const base: Omit<GeoCandidate, 'accepted' | 'reason' | 'cityMatch' | 'provinceMatch' | 'nearPeerKm'> = {
@@ -212,6 +246,9 @@ export function vetHits(hits: RawHit[], t: GeoTarget, peers: Coordinates[], sour
     if (!validCoordinates(point)) return { ...base, cityMatch: false, provinceMatch: false, accepted: false, reason: 'مختصات پاسخ نامعتبر بود' };
     const sanity = coordinateSanity(point);
     if (sanity.state !== 'ok') return { ...base, cityMatch: false, provinceMatch: false, accepted: false, reason: `پاسخ خارج از ایران بود (${sanity.hint || sanity.state})` };
+    if (box && !inScopeBox(point, box)) {
+      return { ...base, cityMatch: false, provinceMatch: false, accepted: false, reason: `این نقطه بیرون از محدودهٔ استان ${box.province} است؛ احتمالاً پاسخ مربوط به خیابان یا شهر دیگری با نام مشابه است (مثل «بزرگراه کردستان» تهران و استان کردستان)` };
+    }
     const haystackCity = norm([hit.city, hit.label].filter(Boolean).join(' '));
     const haystackProvince = norm([hit.province, hit.label].filter(Boolean).join(' '));
     const cityMatch = !wantCity || haystackCity.includes(wantCity);

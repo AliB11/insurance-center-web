@@ -4,6 +4,7 @@ import type { Meta } from '../lib/storage';
 import { fmtNum } from '../lib/text';
 import { Modal, ModalHeader } from './Modal';
 import { Icon, Spinner } from './ui';
+import { DATA_SCOPE } from '../lib/scope';
 
 interface Props {
   tab: 'import' | 'report';
@@ -142,6 +143,12 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
                   <code dir="ltr" className="rounded bg-white px-1.5 text-xs">public/data/</code> قرار دهید تا هنگام ورود خودکار خوانده شود.
                 </li>
                 <li>هدر ستون‌ها (نام، استان، شهر، آدرس، تلفن، …)، سلول‌های ادغام‌شده، هدرهای تکراری و ردیف‌های عنوان به‌صورت هوشمند شناسایی می‌شوند.</li>
+                {DATA_SCOPE && (
+                  <li>
+                    همهٔ مراکز در <b>استان {DATA_SCOPE.province}</b> ثبت می‌شوند؛ نام خیابان‌هایی مثل «بزرگراه کردستان» یا «خیابان قزوین»
+                    استان را تغییر نمی‌دهد. شهر از ستون «شهر» یا ابتدای آدرس («شهریار، …») خوانده می‌شود و در غیر این صورت «{DATA_SCOPE.defaultCity}» است.
+                  </li>
+                )}
               </ul>
             </div>
 

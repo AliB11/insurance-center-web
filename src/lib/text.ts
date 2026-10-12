@@ -47,7 +47,69 @@ export interface Phone {
   tel: string;
 }
 
-export function parsePhones(raw: string): Phone[] {
+/** شمارهٔ داخلی انتهای متن («۵۵۰۰۱۱۲۲ داخلی ۱۲»)؛ جزو شمارهٔ قابل‌شماره‌گیری نیست. */
+const EXTENSION_RE = /\s*(?:داخلی|داخلي|داخل|ext\.?|extension|x)\s*[:.]?\s*\d{1,6}\s*$/i;
+
+/** شماره‌ای که خودش کامل است: ثابت ۸ رقمی بدون کد، یا ۱۱ رقمی با صفر ابتدایی. */
+const isCompleteNumber = (d: string) => (d.length === 8 && /^[2-9]/.test(d)) || (d.length === 11 && d.startsWith('0'));
+
+function finishNumber(digits: string, plus: boolean, areaCode: string): string | null {
+  let d = digits;
+  if (plus) d = `+${d}`;
+  else if (d.startsWith('0098')) d = `+98${d.slice(4)}`;
+  else if (d.length === 10 && d[0] !== '0') d = `0${d}`; // ۲۱۸۸۷۷۶۶۵۵ / ۹۱۲۱۲۳۴۵۶۷
+  else if (areaCode && d.length === 8 && /^[2-9]/.test(d)) d = `${areaCode}${d}`; // ۸۸۷۷۶۶۵۵ → ۰۲۱۸۸۷۷۶۶۵۵
+  const len = d.replace('+', '').length;
+  return len >= 5 && len <= 15 ? d : null;
+}
+
+/**
+ * یک بخش از متن تلفن → شماره‌های قابل‌شماره‌گیری.
+ *   «021-66927008-10»     → 02166927008     (پسوند بازه، جزو شماره نیست)
+ *   «55001122 داخلی 12»   → 02155001122     (داخلی حذف می‌شود)
+ *   «66927008 66927009»   → دو شماره        (نسخهٔ قبلی ۱۶ رقم را یکی می‌کرد و دور می‌انداخت)
+ *   «0912 123 4567»       → 09121234567
+ */
+function numbersInPart(part: string, areaCode: string): Phone[] {
+  const text = part.replace(EXTENSION_RE, '');
+  const groups = Array.from(text.matchAll(/\d+/g), (m) => ({ d: m[0], start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
+  if (!groups.length) return [];
+  const plus = text.trim().startsWith('+');
+  if (plus || groups[0].d.startsWith('0098')) {
+    const tel = finishNumber(groups.map((g) => g.d).join(''), plus, areaCode);
+    return tel ? [{ label: part, tel }] : [];
+  }
+  const found: { digits: string; start: number; end: number }[] = [];
+  let cur: { digits: string; start: number; end: number } | null = null;
+  for (const g of groups) {
+    if (cur && isCompleteNumber(cur.digits)) {
+      if (g.d.length <= 4) {
+        cur.end = g.end; // پسوند بازه: «-10» یعنی تا ...10
+        continue;
+      }
+      found.push(cur);
+      cur = null;
+    }
+    if (!cur) cur = { digits: g.d, start: g.start, end: g.end };
+    else {
+      cur.digits += g.d;
+      cur.end = g.end;
+    }
+  }
+  if (cur) found.push(cur);
+  const out: Phone[] = [];
+  for (const f of found) {
+    const tel = finishNumber(f.digits, false, areaCode);
+    if (tel) out.push({ label: found.length === 1 ? part : text.slice(f.start, f.end).trim(), tel });
+  }
+  return out;
+}
+
+/**
+ * @param areaCode پیش‌شمارهٔ دامنه (مثلاً «021»)؛ به شماره‌های ثابت ۸ رقمی افزوده می‌شود تا
+ *                 دکمهٔ «تماس» از تلفن همراه هم کار کند. برچسب نمایشی همان متن فایل می‌ماند.
+ */
+export function parsePhones(raw: string, areaCode = ''): Phone[] {
   if (!raw) return [];
   const t = toLatinDigits(raw);
   const parts = t
@@ -56,20 +118,27 @@ export function parsePhones(raw: string): Phone[] {
     .filter(Boolean);
   const out: Phone[] = [];
   for (const p of parts) {
-    let digits = p.replace(/\D/g, '');
-    if (digits.length < 5 || digits.length > 15) continue;
-    if (p.trim().startsWith('+')) digits = '+' + digits;
-    else if (digits.startsWith('0098')) digits = '+98' + digits.slice(4);
-    if (digits.length === 10 && digits[0] !== '0') digits = '0' + digits;
-    if (!out.some((phone) => phone.tel === digits)) out.push({ label: p, tel: digits });
+    for (const phone of numbersInPart(p, areaCode)) {
+      if (!out.some((x) => x.tel === phone.tel)) out.push(phone);
+    }
   }
   return out;
 }
 
-export function phonesFromText(text: string): Phone[] {
+/**
+ * شماره‌های داخل متن آزاد (مثلاً آدرس). فقط شماره‌های کامل (با ۰ آغازین) یا — وقتی پیش‌شماره
+ * معلوم است — شمارهٔ ۸ رقمیِ دارای برچسب صریح («تلفن: ۸۸۷۷۶۶۵۵»)؛ عدد بی‌برچسب ممکن است
+ * پلاک یا کد پستی باشد.
+ */
+export function phonesFromText(text: string, areaCode = ''): Phone[] {
   const t = toLatinDigits(text);
-  const m = t.match(/0\d{2,3}[\s-]?\d{7,8}/g) || [];
-  return m.map((x) => ({ label: x.trim(), tel: x.replace(/\D/g, '') }));
+  const out: Phone[] = [];
+  const add = (label: string, tel: string) => { if (!out.some((p) => p.tel === tel)) out.push({ label: label.trim(), tel }); };
+  for (const x of t.match(/0\d{2,3}[\s-]?\d{7,8}/g) || []) add(x, x.replace(/\D/g, ''));
+  if (areaCode) {
+    for (const m of t.matchAll(/(?:تلفن|تلفکس|تلفاکس|شماره تماس|تماس|tel)\s*[:：.]?\s*([2-9]\d{7})(?!\d)/gi)) add(m[1], `${areaCode}${m[1]}`);
+  }
+  return out;
 }
 
 export function highlightRanges(text: string, tokens: string[]): [number, number][] {

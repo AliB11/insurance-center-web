@@ -9,6 +9,7 @@ import App from '../src/App';
 import { demoCenters } from '../src/lib/demo';
 import { applyFilters, EMPTY_FILTERS, tokensOf, countBy } from '../src/lib/search';
 import { parseWorkbook } from '../src/lib/parser';
+import { inScopeBox, TEHRAN_SCOPE } from '../src/lib/scope';
 import * as XLSX from 'xlsx';
 
 // --- حداقل محیط مرورگر برای state initializer ها ---
@@ -39,22 +40,34 @@ must('تعداد مراکز نمونه > 100: ' + list.length, list.length > 100
 must('همه id یکتا هستند', new Set(list.map((c) => c.id)).size === list.length);
 must('همه مراکز تلفن دارند', list.every((c) => c.phones.length > 0));
 must('همه مراکز استان و شهر دارند', list.every((c) => !!c.province && !!c.city));
+must('همهٔ مراکز نمونه در استان تهران‌اند (مثل فهرست واقعی)', list.every((c) => c.province === 'تهران'));
+must('کلید علاقه‌مندی (نام+آدرس) یکتاست', new Set(list.map((c) => `${c.nameN}#${c.address}`)).size === list.length);
+must('تلفن‌های نمونه پیش‌شمارهٔ ۰۲۱ دارند', list.every((c) => c.phones.every((p) => p.tel.startsWith('021'))));
+must('مختصات نمونه داخل محدودهٔ استان تهران است', list.every((c) => !!c.coordinates && inScopeBox(c.coordinates, TEHRAN_SCOPE)));
 
 console.log('\n--- جستجو و فیلتر ---');
-const q = 'بیمارستان رشت';
+const hospital = list.find((c) => c.category === 'بیمارستان')!;
+const q = `بیمارستان ${hospital.name.split(' ').pop()}`;
 const toks = tokensOf(q);
 const res = applyFilters(list, { ...EMPTY_FILTERS, q }, new Set());
 must(`جستجوی «${q}» نتیجه داد: ${res.length}`, res.length > 0);
 must('همهٔ نتایج شامل توکن‌ها هستند', res.every((c) => toks.every((t) => c.search.includes(t))));
 
-const prov = applyFilters(list, { ...EMPTY_FILTERS, province: 'فارس' }, new Set());
-must('فیلتر استان فارس: ' + prov.length, prov.length > 0 && prov.every((c) => c.province === 'فارس'));
+const prov = applyFilters(list, { ...EMPTY_FILTERS, province: 'تهران' }, new Set());
+must('فیلتر استان تهران همهٔ مراکز را نگه می‌دارد: ' + prov.length, prov.length === list.length);
+const city = applyFilters(list, { ...EMPTY_FILTERS, city: 'شهریار' }, new Set());
+must('فیلتر شهر شهریار: ' + city.length, city.length > 0 && city.every((c) => c.city === 'شهریار'));
+const highway = applyFilters(list, { ...EMPTY_FILTERS, q: 'اتوبان کردستان' }, new Set());
+must('«اتوبان کردستان» مراکز «بزرگراه کردستان» را پیدا می‌کند: ' + highway.length,
+  highway.length > 0 && highway.every((c) => c.address.includes('کردستان') && c.province === 'تهران'));
 
 const cat = applyFilters(list, { ...EMPTY_FILTERS, category: 'داروخانه' }, new Set());
 must('فیلتر دستهٔ داروخانه: ' + cat.length, cat.length > 0 && cat.every((c) => c.category === 'داروخانه'));
 
 const facets = countBy(list, (c) => c.province);
-must('فست استان‌ها ساخته شد: ' + facets.length, facets.length >= 25);
+must('فست استان فقط «تهران» است: ' + facets.length, facets.length === 1 && facets[0][0] === 'تهران');
+const cityFacets = countBy(list, (c) => c.city);
+must('فست شهرهای استان تهران ساخته شد: ' + cityFacets.length, cityFacets.length >= 10);
 
 console.log('\n--- پارسر اکسل (مسیر بارگذاری فایل) ---');
 
@@ -69,4 +82,8 @@ const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
 const parsed = parseWorkbook(buf);
 must('پارسر ۲ مرکز استخراج کرد: ' + parsed.centers.length, parsed.centers.length === 2);
 must('استان نرمال‌سازی شد', parsed.centers[0].province === 'تهران');
+must('با دامنهٔ تهران، ستون استانِ دیگر هم «تهران» ثبت می‌شود', parsed.centers[1].province === 'تهران' &&
+  parsed.report[0].notes.some((n) => n.includes('«فارس»')));
+const nationwide = parseWorkbook(buf, { scope: null });
+must('حالت سراسری (scope: null) ستون صریح استان را نگه می‌دارد', nationwide.centers[1].province === 'فارس');
 must('تلفن دوم پارس شد: ' + JSON.stringify(parsed.centers[1].phones.map((p) => p.tel)), parsed.centers[1].phones.length === 2);

@@ -6,6 +6,8 @@ export interface Meta {
   source: 'local' | 'upload' | 'remote' | 'demo';
   loadedAt: number;
   size: number;
+  /** نسخهٔ قالب داده؛ دادهٔ بدون آن (نسخه‌های قبل) هنگام بارگذاری مهاجرت داده می‌شود (migrate.ts) */
+  schema?: number;
 }
 export interface StoredData { centers: Center[]; report: SheetReport[]; meta: Meta }
 
@@ -20,7 +22,8 @@ export function validStoredData(v: unknown): v is StoredData {
   if (!isObject(v) || !isObject(v.meta) || !Array.isArray(v.centers) || !Array.isArray(v.report)) return false;
   const m = v.meta;
   if (!strings(m, ['fileName', 'source']) || !['local', 'upload', 'remote', 'demo'].includes(String(m.source)) ||
-      !Number.isFinite(m.loadedAt) || !Number.isFinite(m.size)) return false;
+      !Number.isFinite(m.loadedAt) || !Number.isFinite(m.size) ||
+      (m.schema !== undefined && !Number.isInteger(m.schema))) return false;
   const ids = new Set<number>();
   for (const c of v.centers) {
     if (!isObject(c) || typeof c.id !== 'number' || !Number.isSafeInteger(c.id) || ids.has(c.id) ||
