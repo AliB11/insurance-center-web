@@ -64,7 +64,10 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
           <div className="space-y-6">
             <div
               onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
-              onDragLeave={() => setDrag(false)}
+              onDragLeave={(e) => {
+                // فقط وقتی واقعاً ناحیه را ترک می‌کنیم (نه هنگام عبور از روی فرزندان) حالت رها را بردار
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDrag(false);
+              }}
               onDrop={(e) => {
                 e.preventDefault();
                 setDrag(false);
