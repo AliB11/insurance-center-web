@@ -128,16 +128,30 @@ export function parsePhones(raw: string, areaCode = ''): Phone[] {
 /**
  * شماره‌های داخل متن آزاد (مثلاً آدرس). فقط شماره‌های کامل (با ۰ آغازین) یا — وقتی پیش‌شماره
  * معلوم است — شمارهٔ ۸ رقمیِ دارای برچسب صریح («تلفن: ۸۸۷۷۶۶۵۵»)؛ عدد بی‌برچسب ممکن است
- * پلاک یا کد پستی باشد.
+ * پلاک یا کد پستی باشد. مرز ارقام رعایت می‌شود تا وسط یک رشتهٔ بلند (کد رهگیری، کد پستی)
+ * به‌اشتباه تلفن حساب نشود («14001234567890» ≠ شماره «001234567890»).
  */
 export function phonesFromText(text: string, areaCode = ''): Phone[] {
   const t = toLatinDigits(text);
   const out: Phone[] = [];
   const add = (label: string, tel: string) => { if (!out.some((p) => p.tel === tel)) out.push({ label: label.trim(), tel }); };
-  for (const x of t.match(/0\d{2,3}[\s-]?\d{7,8}/g) || []) add(x, x.replace(/\D/g, ''));
+  for (const x of t.match(/(?<!\d)0\d{2,3}[\s-]?\d{7,8}(?!\d)/g) || []) add(x, x.replace(/\D/g, ''));
   if (areaCode) {
     for (const m of t.matchAll(/(?:تلفن|تلفکس|تلفاکس|شماره تماس|تماس|tel)\s*[:：.]?\s*([2-9]\d{7})(?!\d)/gi)) add(m[1], `${areaCode}${m[1]}`);
   }
+  return out;
+}
+
+/** جداکننده‌هایی که در دید فشرده نادیده گرفته می‌شوند: فاصله و انواع خط تیره */
+const SEP_RE = /[\s\-\u2010-\u2015\u2212]/;
+
+/**
+ * دید فشردهٔ متن: بدون فاصله و خط تیره، برای تطبیق جستجو/هایلایت با وجود تفاوت املایی:
+ *   «شهرقدس» ↔ «شهر قدس»، «حسناباد» ↔ «حسن‌آباد» (نیم‌فاصله)، «021-66927008» ↔ «02166927008».
+ */
+export function compactTerm(s: string): string {
+  let out = '';
+  for (const ch of s) if (!SEP_RE.test(ch)) out += ch;
   return out;
 }
 
@@ -152,14 +166,27 @@ export function highlightRanges(text: string, tokens: string[]): [number, number
       map.push(i);
     }
   }
+  // دید فشرده (بدون فاصله/خط تیره): «شهرقدس» باید «شهر قدس» و «021-66927008» باید «02166927008» را هایلایت کند
+  let nc = '';
+  const cmap: number[] = [];
+  for (let i = 0; i < nt.length; i++) {
+    if (SEP_RE.test(nt[i])) continue;
+    nc += nt[i];
+    cmap.push(map[i]);
+  }
   const ranges: [number, number][] = [];
+  const scan = (hay: string, idxMap: number[], tok: string) => {
+    let idx = hay.indexOf(tok);
+    while (idx !== -1) {
+      ranges.push([idxMap[idx], idxMap[idx + tok.length - 1] + 1]);
+      idx = hay.indexOf(tok, idx + tok.length);
+    }
+  };
   for (const tok of tokens) {
     if (!tok) continue;
-    let idx = nt.indexOf(tok);
-    while (idx !== -1) {
-      ranges.push([map[idx], map[idx + tok.length - 1] + 1]);
-      idx = nt.indexOf(tok, idx + tok.length);
-    }
+    scan(nt, map, tok);
+    const ct = compactTerm(tok);
+    if (ct) scan(nc, cmap, ct);
   }
   ranges.sort((a, b) => a[0] - b[0]);
   const merged: [number, number][] = [];

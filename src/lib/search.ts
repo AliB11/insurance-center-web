@@ -1,5 +1,5 @@
 import type { Center } from './parser';
-import { norm } from './text';
+import { compactTerm, norm } from './text';
 
 export interface Filters {
   q: string;
@@ -33,6 +33,30 @@ export function placeLabel(c: Pick<Center, 'province' | 'city'>): string {
   return [...new Set([c.province, c.city].map((x) => x.trim()).filter(Boolean))].join('، ');
 }
 
+/** دید فشردهٔ رشتهٔ جستجوی هر مرکز، با کش WeakMap (اشیا بین رندرها پایدارند) */
+const compactCache = new WeakMap<Center, string>();
+const compactOf = (c: Center): string => {
+  let s = compactCache.get(c);
+  if (s === undefined) {
+    s = compactTerm(c.search);
+    compactCache.set(c, s);
+  }
+  return s;
+};
+
+/**
+ * تطبیق یک توکن با متن جستجوی مرکز: هم دقیق و هم فشرده.
+ * جستجو نباید به تفاوت املایی نیم‌فاصله/فاصله/خط تیره حساس باشد:
+ *   «شهرقدس» باید «شهر قدس» را پیدا کند، «حسناباد» باید «حسن‌آباد» را،
+ *   و «021-66927008» باید شمارهٔ ذخیره‌شدهٔ «02166927008» را.
+ */
+export function matchesTerm(c: Center, t: string): boolean {
+  if (!t) return true;
+  if (c.search.includes(t)) return true;
+  const ct = compactTerm(t);
+  return !!ct && compactOf(c).includes(ct);
+}
+
 export function applyFilters(
   all: Center[],
   f: Filters,
@@ -47,18 +71,22 @@ export function applyFilters(
     if (exclude !== 'kind' && f.kind && c.kind !== f.kind) return false;
     if (exclude !== 'hasPhone' && f.hasPhone && c.phones.length === 0) return false;
     if (exclude !== 'favOnly' && f.favOnly && !favs.has(c.id)) return false;
-    for (const t of toks) if (!c.search.includes(t)) return false;
+    for (const t of toks) if (!matchesTerm(c, t)) return false;
     return true;
   });
 }
 
 export function relevance(c: Center, toks: string[]): number {
+  const nameC = compactTerm(c.nameN);
+  const locC = compactTerm(c.locN);
+  const catC = compactTerm(c.catN);
   let s = 0;
   for (const t of toks) {
-    if (c.nameN.startsWith(t)) s += 8;
-    else if (c.nameN.includes(t)) s += 5;
-    if (c.locN.includes(t)) s += 3;
-    if (c.catN.includes(t)) s += 2;
+    const ct = compactTerm(t) || t;
+    if (c.nameN.startsWith(t) || nameC.startsWith(ct)) s += 8;
+    else if (c.nameN.includes(t) || nameC.includes(ct)) s += 5;
+    if (c.locN.includes(t) || locC.includes(ct)) s += 3;
+    if (c.catN.includes(t) || catC.includes(ct)) s += 2;
     s += 1;
   }
   return s;

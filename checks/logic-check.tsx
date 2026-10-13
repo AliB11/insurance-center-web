@@ -7,7 +7,7 @@ import { renderToString } from 'react-dom/server';
 import { createElement } from 'react';
 import App from '../src/App';
 import { demoCenters } from '../src/lib/demo';
-import { applyFilters, EMPTY_FILTERS, tokensOf, countBy } from '../src/lib/search';
+import { applyFilters, EMPTY_FILTERS, tokensOf, countBy, matchesTerm } from '../src/lib/search';
 import { parseWorkbook } from '../src/lib/parser';
 import { inScopeBox, TEHRAN_SCOPE } from '../src/lib/scope';
 import * as XLSX from 'xlsx';
@@ -51,7 +51,7 @@ const q = `بیمارستان ${hospital.name.split(' ').pop()}`;
 const toks = tokensOf(q);
 const res = applyFilters(list, { ...EMPTY_FILTERS, q }, new Set());
 must(`جستجوی «${q}» نتیجه داد: ${res.length}`, res.length > 0);
-must('همهٔ نتایج شامل توکن‌ها هستند', res.every((c) => toks.every((t) => c.search.includes(t))));
+must('همهٔ نتایج شامل توکن‌ها هستند', res.every((c) => toks.every((t) => matchesTerm(c, t))));
 
 const prov = applyFilters(list, { ...EMPTY_FILTERS, province: 'تهران' }, new Set());
 must('فیلتر استان تهران همهٔ مراکز را نگه می‌دارد: ' + prov.length, prov.length === list.length);

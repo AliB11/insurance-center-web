@@ -13,8 +13,8 @@ import { detectProvince, exactProvince, explicitProvince } from '../src/lib/geo'
 import { canonicalCity, detectScopeCity, TEHRAN_SCOPE } from '../src/lib/scope';
 import { DATA_SCHEMA, migrateStored } from '../src/lib/migrate';
 import { tryRemote, tryLocal, remoteUrl } from '../src/lib/loader';
-import { parsePhones } from '../src/lib/text';
-import { applyFilters, EMPTY_FILTERS } from '../src/lib/search';
+import { parsePhones, highlightRanges, phonesFromText, compactTerm } from '../src/lib/text';
+import { applyFilters, EMPTY_FILTERS, matchesTerm, tokensOf } from '../src/lib/search';
 
 let count = 0;
 const check = (name: string, action: () => void) => { action(); count++; console.log('PASS ', name); };
@@ -272,6 +272,37 @@ check('search: street type is optional («اتوبان کردستان» finds «
   assert.equal(hits.length, 3);
   assert.equal(applyFilters(list, { ...EMPTY_FILTERS, q: 'کوچه ۱۲' }, new Set()).length, 1, 'numbers keep the street word');
 });
+check('search: spacing/hyphen variance matches (شهرقدس ↔ شهر قدس، 021-66927008 ↔ 02166927008)', () => {
+  const list = parseWorkbook(workbook([
+    ['نام مرکز', 'شهر', 'آدرس', 'تلفن'],
+    ['داروخانه قدس', 'قدس', 'شهر قدس، بلوار انقلاب', '66927008'],
+    ['درمانگاه حسن‌آباد', 'تهران', 'حسن‌آباد، خیابان گلستان', ''],
+  ])).centers;
+  // نیم‌فاصله در فایل، تایپ بدون نیم‌فاصله در جستجو
+  assert.equal(applyFilters(list, { ...EMPTY_FILTERS, q: 'حسناباد' }, new Set()).length, 1);
+  // فاصله در فایل، تایپ چسبیده در جستجو
+  assert.equal(applyFilters(list, { ...EMPTY_FILTERS, q: 'شهرقدس' }, new Set()).length, 1);
+  // شماره با خط تیره، دقیقاً همان شکلی که روی کارت نمایش داده می‌شود
+  assert.equal(applyFilters(list, { ...EMPTY_FILTERS, q: '021-66927008' }, new Set()).length, 1);
+  assert.equal(applyFilters(list, { ...EMPTY_FILTERS, q: '۶۶۹۲۷۰۰۸' }, new Set()).length, 1);
+  // جستجوی دقیق همچنان کار می‌کند و نتیجهٔ بی‌ربط نمی‌دهد
+  assert.equal(applyFilters(list, { ...EMPTY_FILTERS, q: 'کهریزک' }, new Set()).length, 0);
+  assert.ok(matchesTerm(list[0], tokensOf('شهرقدس')[0]));
+  assert.equal(compactTerm('021-66927008'), '02166927008');
+});
+check('highlight covers spacing-variance matches too', () => {
+  const ranges = highlightRanges('شهر قدس، بلوار انقلاب', ['شهرقدس']);
+  assert.deepEqual(ranges, [[0, 7]]);
+  const phone = highlightRanges('تلفن: 021-66927008', ['02166927008']);
+  assert.deepEqual(phone, [[6, 18]]);
+  assert.deepEqual(highlightRanges('متن', []), []);
+});
+check('bare numbers inside long digit runs are not phones in free text', () => {
+  assert.equal(phonesFromText('کد رهگیری 14001234567890').length, 0);
+  assert.equal(phonesFromText('کد 198765432101234').length, 0);
+  assert.deepEqual(phonesFromText('خیابان آزادی، تلفن: 88776655', '021').map((p) => p.tel), ['02188776655']);
+  assert.deepEqual(phonesFromText('021 88776655').map((p) => p.tel), ['02188776655']);
+});
 
 /** دادهٔ ذخیره‌شده با منطق نسخهٔ قبل: استان از نام خیابان، تلفن بدون پیش‌شماره، بدون schema */
 function legacyStore(): StoredData {
@@ -414,6 +445,20 @@ async function networkTests() {
       ? new Response('<a href="/centers.xlsx?a=1&amp;b=2">Download</a>') : new Response(bytes);
     assert.equal((await tryRemote('https://example.com/page'))?.name, 'centers.xlsx');
     console.log('PASS  relative spreadsheet URL discovered'); count++;
+
+    const csvText = 'نام مرکز,شهر,آدرس\nداروخانه مهر,تهران,خیابان آزادی';
+    globalThis.fetch = async (input) => String(input).includes('/page')
+      ? new Response('<a href="/centers.csv">CSV</a>') : new Response(csvText);
+    assert.equal((await tryRemote('https://example.com/page'))?.name, 'centers.csv');
+    globalThis.fetch = async () => new Response(csvText);
+    assert.equal((await tryRemote('https://example.com/centers.csv'))?.name, 'centers.csv');
+    console.log('PASS  remote CSV (direct URL and discovered link) is accepted as a data file'); count++;
+
+    globalThis.fetch = async () => new Response('<html><body>404 page</body></html>');
+    assert.equal(await tryRemote('https://example.com/data.csv'), null);
+    globalThis.fetch = async () => new Response('not found');
+    assert.equal(await tryRemote('https://example.com/centers.csv'), null);
+    console.log('PASS  HTML/plain error pages are never mistaken for CSV data'); count++;
 
     globalThis.fetch = async (input) => {
       calls.push(String(input));

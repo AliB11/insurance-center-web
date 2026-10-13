@@ -1,4 +1,4 @@
-const LOCAL_CANDIDATES = ['data/centers.xlsx', 'centers.xlsx', 'data.xlsx', 'hr.xlsx', 'data/data.xlsx', 'data/centers.xls', 'centers.xls'];
+const LOCAL_CANDIDATES = ['data/centers.xlsx', 'centers.xlsx', 'data.xlsx', 'hr.xlsx', 'data/data.xlsx', 'data/centers.xls', 'centers.xls', 'data/centers.csv', 'centers.csv'];
 const SOURCE_PAGE = 'https://sphbank.ir/hr';
 const MAX_BYTES = 20 * 1024 * 1024;
 
@@ -39,12 +39,34 @@ async function request(url: string, timeout: number, maxBytes = MAX_BYTES, signa
   finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
 }
 
+/**
+ * متن جدولی (CSV) قابل قبول است؟ ZIP/OLE نیست و صفحهٔ HTML/JSON هم نیست؛
+ * خط اول باید جداکنندهٔ ستون داشته باشد. این تشخیص ابتکاری است و در گزارش
+ * واردسازی با ساختار واقعی فایل تطبیق داده می‌شود.
+ */
+function looksLikeTabularText(bytes: Uint8Array): boolean {
+  const n = Math.min(bytes.length, 4096);
+  let printable = 0;
+  for (let i = 0; i < n; i++) {
+    const b = bytes[i];
+    if (b === 9 || b === 10 || b === 13 || (b >= 32 && b !== 127) || b >= 0x80) printable++;
+  }
+  if (printable / n < 0.99) return false;
+  const head = new TextDecoder('utf-8', { fatal: false }).decode(bytes.subarray(0, n));
+  const trimmed = head.replace(/^\uFEFF/, '').trimStart().toLowerCase();
+  if (!trimmed || trimmed.startsWith('<') || trimmed.startsWith('{') || trimmed.startsWith('[')) return false;
+  const firstLine = trimmed.split(/\r?\n/, 1)[0] ?? '';
+  return /[,;\t|]/.test(firstLine);
+}
+
 async function fetchSpreadsheet(url: string, timeout: number, signal?: AbortSignal): Promise<ArrayBuffer | null> {
   const bytes = await request(url, timeout, MAX_BYTES, signal);
-  if (!bytes || bytes.length < 200) return null;
+  if (!bytes) return null;
   const zip = bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 3 && bytes[3] === 4;
   const ole = bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;
-  return zip || ole ? bytes.buffer as ArrayBuffer : null;
+  if (zip || ole) return bytes.length >= 200 ? (bytes.buffer as ArrayBuffer) : null;
+  if (bytes.length >= 8 && looksLikeTabularText(bytes)) return bytes.buffer as ArrayBuffer;
+  return null;
 }
 
 export interface Loaded { buf: ArrayBuffer; name: string; source: 'local' | 'remote' }
@@ -67,14 +89,14 @@ function fileName(url: URL): string {
 export async function tryRemote(pageUrl = SOURCE_PAGE, onStatus?: (s: string) => void): Promise<Loaded | null> {
   const url = remoteUrl(pageUrl);
   onStatus?.('دریافت مستقیم از آدرس…');
-  if (/\.xls[xm]?$/i.test(url.pathname)) {
+  if (/\.(xls[xm]?|csv)$/i.test(url.pathname)) {
     const buf = await fetchSpreadsheet(url.href, 15000);
     return buf ? { buf, name: fileName(url), source: 'remote' } : null;
   }
   const bytes = await request(url.href, 10000, 2 * 1024 * 1024);
   if (!bytes) return null;
   const html = new TextDecoder().decode(bytes);
-  const links = [...html.matchAll(/href\s*=\s*["']([^"']+\.xls[xm]?(?:[?#][^"']*)?)["']/gi)].slice(0, 5);
+  const links = [...html.matchAll(/href\s*=\s*["']([^"']+\.(?:xls[xm]?|csv)(?:[?#][^"']*)?)["']/gi)].slice(0, 5);
   for (const [, link] of links) {
     let target: URL;
     try { target = remoteUrl(new URL(link.replace(/&amp;/g, '&'), url).href); } catch { continue; }

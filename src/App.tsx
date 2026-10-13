@@ -77,12 +77,14 @@ export default function App() {
       return false;
     }
     const m: Meta = { fileName: name, source, loadedAt: Date.now(), size: buf.byteLength, schema: DATA_SCHEMA };
+    // اول ذخیره، بعد رندر: تا کاربر دادهٔ تازه را می‌بیند، نوشتن در حافظهٔ مرورگر تمام شده است؛
+    // refresh/f بستن سریع صفحه بلافاصله پس از واردسازی دیگر داده را از دست نمی‌دهد.
+    const saved = await saveData({ centers: res.centers, report: res.report, meta: m });
     setCenters(res.centers);
     setReport(res.report);
     setMeta(m);
     setFilters(EMPTY_FILTERS);
     setStatus(`${fmtNum(res.centers.length)} مرکز بارگذاری شد.`);
-    const saved = await saveData({ centers: res.centers, report: res.report, meta: m });
     flash(saved ? 'فایل با موفقیت بارگذاری و ذخیره شد' : 'فایل بارگذاری شد، اما ذخیرهٔ مرورگر ممکن نشد؛ پس از بستن صفحه باید دوباره بارگذاری شود.');
     return true;
   }, [flash]);
@@ -841,7 +843,7 @@ export default function App() {
                       <thead className="sticky bg-slate-50 text-xs text-slate-500" style={{ top: barH + 62 }}>
                         <tr>
                           {['', 'نام مرکز', 'دسته', soleProvince ? 'شهر' : 'استان / شهر', 'آدرس', 'تلفن', ''].map((h, i) => (
-                            <th key={i} className="whitespace-nowrap px-3 py-3 font-semibold">{h}</th>
+                            <th key={i} scope="col" className="whitespace-nowrap px-3 py-3 font-semibold">{h}</th>
                           ))}
                         </tr>
                       </thead>
