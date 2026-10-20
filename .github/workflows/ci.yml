@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Type-check, unit and component checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - name: Upload single-file build
+        uses: actions/upload-artifact@v5
+        with:
+          name: dist-single-file
+          path: dist/index.html
+          retention-days: 7
+
+  browser:
+    name: Chromium end-to-end checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Start preview server
+        run: |
+          npx vite preview --port 4173 --strictPort >/tmp/preview.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:4173/ >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo 'preview server did not start'; cat /tmp/preview.log; exit 1
+      - name: Run browser checks against the production build
+        run: APP_URL=http://127.0.0.1:4173/ npm run check:browser
+      - name: Keep screenshots and preview log on failure
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: browser-check-artifacts
+          path: |
+            .check/*.png
+            /tmp/preview.log
+          if-no-files-found: ignore
+          retention-days: 7

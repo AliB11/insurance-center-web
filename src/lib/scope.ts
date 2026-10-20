@@ -231,3 +231,22 @@ export function canonicalCity(value: string, scope: DataScope | null = DATA_SCOP
   if (viaMarker && viaMarker.rest === '') return viaMarker.hit.city.name;
   return cleaned;
 }
+
+/**
+ * شهرهای دامنه که در متن آمده‌اند (با مرز واژه، شامل نام‌های مستعار).
+ * برای سنجش پاسخ ژئوکد لازم است: «تهران، ورامین» دو شهر است و نباید با
+ * «تهران» به‌عنوان شهر مرکز تطبیق داده شود (استان در ابتدای برچسب همهٔ پاسخ‌ها هست).
+ */
+export function citiesInScope(text: string, scope: DataScope | null = DATA_SCOPE): string[] {
+  if (!scope || !text) return [];
+  const keys = cityKeys(scope);
+  const padded = ` ${norm(text).replace(/[.،,؛;|/()\-–—:：]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+  const found: { name: string; index: number; len: number }[] = [];
+  for (const k of keys) {
+    const at = padded.indexOf(` ${k.key} `);
+    if (at < 0) continue;
+    found.push({ name: k.city.name, index: at, len: k.key.length });
+  }
+  found.sort((a, b) => a.index - b.index || b.len - a.len);
+  return [...new Set(found.map((f) => f.name))];
+}

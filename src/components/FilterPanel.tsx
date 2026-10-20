@@ -1,6 +1,6 @@
 import type { Filters } from '../lib/search';
 import { toFa } from '../lib/text';
-import { Icon } from './ui';
+import { Icon, type IconName } from './ui';
 
 interface Props {
   filters: Filters;
@@ -33,7 +33,7 @@ function SelectField({
   onChange: (v: string) => void;
   options: [string, number][];
   disabled?: boolean;
-  icon: string;
+  icon: IconName;
 }) {
   return (
     <label className="block">

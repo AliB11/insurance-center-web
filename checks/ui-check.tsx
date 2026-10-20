@@ -177,7 +177,14 @@ async function main() {
   const starBtn = dom.window.document.querySelector('button[aria-label="افزودن به علاقه‌مندی‌ها"]') as HTMLButtonElement;
   await act(async () => { starBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
-  must('علاقه‌مندی ثبت شد', dom.window.localStorage.getItem('sepah-favs') !== null);
+  // علاقه‌مندی‌ها اکنون به مجموعهٔ داده (منبع+نام فایل) محدود و نسخه‌دار ذخیره می‌شوند
+  const favStore = JSON.parse(dom.window.localStorage.getItem('sepah-favs-v2') || 'null');
+  const favLists = favStore && typeof favStore === 'object' ? Object.entries(favStore) : [];
+  must(
+    'علاقه‌مندی در کلید نسخه‌دار و برای همین مجموعه ذخیره شد: ' + favLists.map(([k, v]) => `${k}=${(v as string[]).length}`).join(', '),
+    favStore !== null && favLists.length === 1 && (favLists[0][0] as string).startsWith('demo:')
+      && (favLists[0][1] as string[]).length === 1,
+  );
 
   await act(async () => { root.unmount(); });
   must('unmount بدون خطا', true);

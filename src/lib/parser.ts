@@ -6,6 +6,12 @@ import { DATA_SCOPE, canonicalCity, detectScopeCity, isScopeCity, type DataScope
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_SHEET_CELLS = 1_000_000;
+/** سقف مجموع خانه‌های همهٔ شیت‌ها؛ سقف تک‌شیت جلوی فایل چندشیتی/فشردهٔ حجیم را نمی‌گرفت */
+const MAX_TOTAL_CELLS = 2_000_000;
+const MAX_SHEETS = 60;
+/** سقف ردیف‌های گزارش؛ بیشتر از این فقط شمرده می‌شود تا گزارش بی‌صدا کوتاه نشود */
+const REPORT_ROW_LIMIT = 40;
+const REPORT_NOTE_LIMIT = 50;
 
 export interface Center {
   id: number;
@@ -197,13 +203,16 @@ function buildPlan(headers: string[], rows: string[][], start: number): ColPlan 
   return { fields, labels };
 }
 
+/** واژه‌هایی که نشان می‌دهند یک سلول متن، آدرس است (نه نام مرکز یا توضیح). */
+const ADDRESS_HINT = /(خیابان|بلوار|کوچه|بزرگراه|اتوبان|آزادراه|میدان|جاده|کوی|بن بست|پلاک|طبقه|واحد|جنب|روبرو|نرسیده|نبش|شهرک|فاز|منطقه|فلکه|چهارراه|سه راه|پاساژ|مجتمع|ساختمان|برج|خیابان)/;
+
 function guessPlan(rows: string[][]): { plan: ColPlan; start: number } {
   const width = rows.reduce((max, r) => Math.max(max, r.length), 0);
   const sample = rows.filter((r) => r.filter(Boolean).length >= 2).slice(0, 40);
   const start = Math.max(0, rows.findIndex((r) => r.some(Boolean)));
   const fields: Field[] = new Array(width).fill('extra');
   const labels: string[] = [];
-  const stats: { phone: number; num: number; prov: number; avg: number; has: boolean }[] = [];
+  const stats: { phone: number; num: number; prov: number; avg: number; addr: number; text: number; has: boolean }[] = [];
   for (let c = 0; c < width; c++) {
     const vals = sample.map((r) => r[c]).filter(Boolean);
     const n = Math.max(vals.length, 1);
@@ -215,25 +224,79 @@ function guessPlan(rows: string[][]): { plan: ColPlan; start: number } {
     // فقط مقدارهای «دقیقاً نام استان»؛ ستونی پر از «بزرگراه کردستان»/«خیابان قزوین» ستون استان نیست
     const prov = vals.filter((v) => v.length < 25 && exactProvince(v)).length / n;
     const avg = vals.reduce((a, v) => a + v.length, 0) / n;
-    stats.push({ phone, num, prov, avg, has: vals.length > 0 });
+    // آدرس را از «نشانه‌های معبر» بشناس، نه فقط از طول متن: «خیابان آزادی، پلاک ۲» کوتاه است
+    const addr = vals.filter((v) => ADDRESS_HINT.test(v)).length / n;
+    const text = vals.filter((v) => v.length >= 3 && v.length <= 60 && !/^[\d۰-۹\s\-/.,]+$/.test(v)).length / n;
+    stats.push({ phone, num, prov, avg, addr, text, has: vals.length > 0 });
     labels.push(`ستون ${XLSX.utils.encode_col(c)}`);
   }
-  let addrCol = -1;
-  let best = 25;
   stats.forEach((s, c) => {
     if (!s.has) fields[c] = 'rowno';
     else if (s.num > 0.8) fields[c] = 'rowno';
     else if (s.phone > 0.5) fields[c] = 'phone';
     else if (s.prov > 0.6) fields[c] = 'province';
-    else if (s.avg > best) {
-      best = s.avg;
+  });
+  // آدرس: ستونی که بیشتر مقدارهایش نشانهٔ معبر دارند. اگر هیچ ستونی نشانه نداشت،
+  // به همان معیار قدیمی (بلندترین متن) برمی‌گردیم تا فایل‌های بدون نشانه هم از دست نروند.
+  let addrCol = -1;
+  let addrScore = 0.5;
+  stats.forEach((s, c) => {
+    if (fields[c] !== 'extra' || !s.has) return;
+    const score = s.addr * 2 + Math.min(s.avg, 80) / 160;
+    if (s.addr >= 0.5 && score > addrScore) {
+      addrScore = score;
       addrCol = c;
     }
   });
+  if (addrCol < 0) {
+    let longest = 25;
+    stats.forEach((s, c) => {
+      if (fields[c] === 'extra' && s.has && s.avg > longest) {
+        longest = s.avg;
+        addrCol = c;
+      }
+    });
+  }
   if (addrCol >= 0) fields[addrCol] = 'address';
-  const nameCol = fields.findIndex((f, c) => f === 'extra' && stats[c].has);
+  // نام: ستون متنی که آدرس/تلفن/ردیف نیست؛ ترجیح با متنی است که عدد ندارد و طول معقول دارد
+  let nameCol = -1;
+  let nameScore = -1;
+  stats.forEach((s, c) => {
+    if (fields[c] !== 'extra' || !s.has) return;
+    const score = s.text * 2 + (s.avg >= 3 && s.avg <= 60 ? 1 : 0) - (s.addr >= 0.5 ? 1 : 0);
+    if (score > nameScore) {
+      nameScore = score;
+      nameCol = c;
+    }
+  });
   if (nameCol >= 0) fields[nameCol] = 'name';
   return { plan: { fields, labels }, start };
+}
+
+/**
+ * عناوین گروه‌بندیِ تک‌سلولی در فایل‌های فارسی («بیمارستان‌ها»، «آزمایشگاه ها»،
+ * «مراکز تصویربرداری»، «لیست داروخانه‌ها»). این سطرها مرکز نیستند: نسخهٔ قبلی
+ * آن‌ها را با دستهٔ استنباط‌شده به داده اضافه می‌کرد و شمارش/خروجی/جستجو را
+ * آلوده می‌ساخت. نام واقعی مرکز معمولاً «داروخانه البرز» است، نه «داروخانه‌ها»
+ * (همان موردی که آزمون رگرسیون جداگانه قفل کرده است).
+ */
+const CATEGORY_WORDS = new Set([
+  'بیمارستان', 'داروخانه', 'ازمایشگاه', 'آزمایشگاه', 'کلینیک', 'درمانگاه', 'مطب', 'پلی کلینیک',
+  'تصویربرداری', 'رادیولوژی', 'سونوگرافی', 'دندانپزشکی', 'فیزیوتراپی', 'توانبخشی', 'دیالیز',
+  'اپتیک', 'عینک', 'بینایی سنجی', 'مشاوره', 'روان شناسی', 'زنان', 'زایمان', 'مامایی',
+  'شنوایی', 'گفتار درمانی', 'سمعک', 'جراحی', 'قلب', 'پوست', 'مو', 'چشم پزشکی', 'ارتوپدی',
+  'داخلی', 'اطفال', 'مغز', 'اعصاب', 'تخصصی', 'پزشکان', 'مراکز',
+].map(norm));
+
+function isGroupHeading(text: string): boolean {
+  const n = norm(text);
+  if (!n || n.length > 40 || /\d/.test(n)) return false;
+  if (CATEGORY_WORDS.has(n)) return true;
+  // جمع فارسی فقط روی واژهٔ دسته پذیرفته می‌شود: «بیمارستان‌ها» ✓، «داروخانه رها» ✗
+  const singular = n.replace(/(?:های|ها|هاي)$/, '').trim();
+  if (singular !== n && (CATEGORY_WORDS.has(singular) || CATEGORY_WORDS.has(n.replace(/ی$/, '')))) return true;
+  if (singular !== n && isSectionText(singular)) return true;
+  return /^(?:لیست|فهرست|جدول|بخش|گروه)\b/.test(n);
 }
 
 function isSectionText(t: string): boolean {
@@ -353,10 +416,14 @@ function parseSheet(
   let currentLabels = plan.labels;
   let fillDown = 0;
   let sectionRows = 0;
+  let groupHeadings = 0;
+  const groupSamples = new Set<string>();
   let repeated = 0;
   const seen = new Set<string>();
   let dups = 0;
   let noName = 0;
+  let skippedOverflow = 0;
+  let notesOverflow = 0;
   let suspiciousCoords = 0;
   const suspiciousRows: number[] = [];
   // دامنهٔ داده (استان تهران)
@@ -411,10 +478,14 @@ function parseSheet(
       const cm = text.match(/^(?:شهر|شهرستان)\s*[:：]?\s*(.+)$/);
       // فقط عنوان صریح («تهران»، «استان تهران»، «مراکز استان تهران»)؛ «داروخانه البرز» یک مرکز است، نه عنوان استان
       const provDetected = text.length < 40 ? explicitProvince(text) : '';
+      // «بیمارستان‌ها» / «داروخانه های تخصصی»: سطر گروه‌بندی، نه مرکز. بدون این شرط،
+      // هر عنوان یک مرکز جعلی با دستهٔ استنباط‌شده می‌شد (شمارش، خروجی و جستجو آلوده می‌شد).
+      const groupHeading = st.count === 1 && isGroupHeading(text) && !pm && !provDetected;
       const treatAsSection =
         st.count >= 2 || // merged horizontally
         pm || cm || provDetected ||
         nextIsHeader ||
+        groupHeading ||
         (isSectionText(text) && median > 1.5);
       if (treatAsSection) {
         if (pm || (provDetected && !cm)) { ctxCity = ''; lastCity = ''; lastProv = ''; }
@@ -425,7 +496,12 @@ function parseSheet(
           if (!exactProvince(text)) ctxSection = text; // «مراکز طرف قرارداد استان تهران» زمینهٔ دسته هم هست
         } else ctxSection = text;
         sectionRows++;
-        if (rep.skipped.length < 40) rep.skipped.push({ row: excelRow, reason: 'سطر عنوان/گروه‌بندی', text });
+        if (groupHeading && !pm && !cm && !provDetected) {
+          groupHeadings++;
+          if (groupSamples.size < 6) groupSamples.add(text);
+        }
+        if (rep.skipped.length < REPORT_ROW_LIMIT) rep.skipped.push({ row: excelRow, reason: 'سطر عنوان/گروه‌بندی', text });
+        else skippedOverflow++;
         continue;
       }
     }
@@ -462,7 +538,8 @@ function parseSheet(
     if (!phones.length && address) phones = phonesFromText(address, areaCode);
 
     if (/^جمع(?: کل)?(?:\s|$)/.test(norm(name))) {
-      if (rep.skipped.length < 40) rep.skipped.push({ row: excelRow, reason: 'سطر جمع', text: name });
+      if (rep.skipped.length < REPORT_ROW_LIMIT) rep.skipped.push({ row: excelRow, reason: 'سطر جمع', text: name });
+      else skippedOverflow++;
       continue;
     }
 
@@ -532,7 +609,8 @@ function parseSheet(
 
     const coordinates = parseCoordinates(get('latitude'), get('longitude'));
     if (!coordinates && (get('latitude') || get('longitude'))) {
-      if (rep.notes.length < 50) rep.notes.push(`مختصات ردیف ${excelRow} نامعتبر بود و برای مسیریابی استفاده نشد.`);
+      if (rep.notes.length < REPORT_NOTE_LIMIT) rep.notes.push(`مختصات ردیف ${excelRow} نامعتبر بود و برای مسیریابی استفاده نشد.`);
+      else notesOverflow++;
     }
     if (coordinates && coordinateSanity(coordinates).state !== 'ok') {
       suspiciousCoords++;
@@ -569,12 +647,15 @@ function parseSheet(
     if (areaCodeAdded) rep.notes.push(`پیش‌شمارهٔ ${toFa(scope.areaCode)} به ${fa(areaCodeAdded)} شمارهٔ ثابت بدون کد افزوده شد تا دکمهٔ «تماس» از تلفن همراه هم کار کند.`);
   }
   if (sectionRows) rep.notes.push(`${fa(sectionRows)} سطر عنوان/گروه‌بندی شناسایی و به‌عنوان زمینه (استان/دسته) استفاده شد.`);
+  if (groupHeadings) rep.notes.push(`${fa(groupHeadings)} سطر عنوانِ دسته (مثل ${samples(groupSamples)}) به‌عنوان مرکز ثبت نشد و فقط زمینهٔ دسته است.`);
   if (repeated) rep.notes.push(`${fa(repeated)} هدر تکراری در میانه‌ی شیت شناسایی شد.`);
   if (fillDown) rep.notes.push(`${fa(fillDown)} خانه‌ی خالی استان/شهر از ردیف‌های بالاتر تکمیل شد.`);
   if (noName) rep.notes.push(`${fa(noName)} ردیف بدون «نام» بود و از ستون‌های دیگر نام‌گذاری شد.`);
   if (dups) rep.notes.push(`${fa(dups)} ردیف تکراری (نام+آدرس+تلفن یکسان) وجود دارد (حذف نشد).`);
   if (suspiciousCoords) rep.notes.push(`مختصات ${fa(suspiciousCoords)} ردیف با نقشهٔ ایران هم‌خوان نیست (بیرون ایران، صفر، یا جابه‌جایی احتمالی عرض/طول — نمونه سطر: ${suspiciousRows.join('، ')}${suspiciousCoords > suspiciousRows.length ? '، …' : ''})؛ داده نگه داشته شد و در پنجرهٔ مسیریابی هشدار داده می‌شود.`);
   if (sheetIsProvince && !scope) rep.notes.push(`نام شیت به‌عنوان استان «${sheetProvince}» شناخته شد.`);
+  if (skippedOverflow) rep.notes.push(`${fa(skippedOverflow)} سطر کنارگذاشته‌شدهٔ دیگر در فهرست بالا نیامد (سقف نمایش ${fa(REPORT_ROW_LIMIT)} سطر).`);
+  if (notesOverflow) rep.notes.push(`${fa(notesOverflow)} یادداشت دیگر دربارهٔ مختصات نامعتبر نمایش داده نشد (سقف نمایش ${fa(REPORT_NOTE_LIMIT)}).`);
   if (centers.length === 0) rep.notes.push('هیچ مرکزی از این شیت استخراج نشد.');
   return { centers, rep };
 }
@@ -585,6 +666,17 @@ export function parseWorkbook(buf: ArrayBuffer, options: ParseOptions = {}): Par
   const signature = new Uint8Array(buf, 0, Math.min(buf.byteLength, 2));
   const binary = (signature[0] === 0x50 && signature[1] === 0x4b) || (signature[0] === 0xd0 && signature[1] === 0xcf);
   const wb = XLSX.read(buf, { type: 'array', cellDates: false, cellText: true, ...(binary ? {} : { codepage: 65001 }) });
+  // سقف تک‌شیت جلوی فایل چندشیتی را نمی‌گرفت: پیش از sheet_to_json (که حافظه‌بر است)
+  // مجموع خانه‌ها و تعداد شیت‌ها را می‌سنجیم.
+  if (wb.SheetNames.length > MAX_SHEETS) throw new Error(`تعداد شیت‌ها بیش از حد مجاز است (حداکثر ${MAX_SHEETS} شیت)`);
+  let totalCells = 0;
+  for (const name of wb.SheetNames) {
+    const ref = wb.Sheets[name]?.['!ref'];
+    if (!ref) continue;
+    const range = XLSX.utils.decode_range(ref);
+    totalCells += (range.e.r - range.s.r + 1) * (range.e.c - range.s.c + 1);
+    if (totalCells > MAX_TOTAL_CELLS) throw new Error('حجم کل شیت‌های فایل بیش از حد مجاز است');
+  }
   const all: Center[] = [];
   const report: SheetReport[] = [];
   wb.SheetNames.forEach((name, i) => {

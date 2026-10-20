@@ -52,7 +52,7 @@ export function CenterCard({ c, tokens, fav, index = 0, demo = false, onFav, onO
                 {c.discount}
               </span>
             )}
-            {demo && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-400">نمونه</span>}
+            {demo && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">نمونه</span>}
           </div>
         </div>
 
