@@ -86,14 +86,18 @@ function fileName(url: URL): string {
 }
 
 /** No public CORS relays: never send source URLs through untrusted third parties. */
-export async function tryRemote(pageUrl = SOURCE_PAGE, onStatus?: (s: string) => void): Promise<Loaded | null> {
+export async function tryRemote(
+  pageUrl = SOURCE_PAGE,
+  onStatus?: (s: string) => void,
+  signal?: AbortSignal,
+): Promise<Loaded | null> {
   const url = remoteUrl(pageUrl);
   onStatus?.('دریافت مستقیم از آدرس…');
   if (/\.(xls[xm]?|csv)$/i.test(url.pathname)) {
-    const buf = await fetchSpreadsheet(url.href, 15000);
+    const buf = await fetchSpreadsheet(url.href, 15000, signal);
     return buf ? { buf, name: fileName(url), source: 'remote' } : null;
   }
-  const bytes = await request(url.href, 10000, 2 * 1024 * 1024);
+  const bytes = await request(url.href, 10000, 2 * 1024 * 1024, signal);
   if (!bytes) return null;
   const html = new TextDecoder().decode(bytes);
   const links = [...html.matchAll(/href\s*=\s*["']([^"']+\.(?:xls[xm]?|csv)(?:[?#][^"']*)?)["']/gi)].slice(0, 5);
@@ -101,7 +105,8 @@ export async function tryRemote(pageUrl = SOURCE_PAGE, onStatus?: (s: string) =>
     let target: URL;
     try { target = remoteUrl(new URL(link.replace(/&amp;/g, '&'), url).href); } catch { continue; }
     onStatus?.('در حال دریافت فایل اکسل…');
-    const buf = await fetchSpreadsheet(target.href, 10000);
+    if (signal?.aborted) return null;
+    const buf = await fetchSpreadsheet(target.href, 10000, signal);
     if (buf) return { buf, name: fileName(target), source: 'remote' };
   }
   return null;

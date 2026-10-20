@@ -15,6 +15,8 @@ interface Props {
   onFile: (f: File) => void;
   onRemote: (url: string) => void;
   onReset: () => void;
+  /** لغو دریافت آنلاینِ در جریان (بستن پنجره هم آن را لغو می‌کند) */
+  onCancel?: () => void;
   onClose: () => void;
 }
 
@@ -28,7 +30,7 @@ const FIELD_COLOR: Record<string, string> = {
   extra: 'bg-slate-100 text-slate-600',
 };
 
-export function ImportModal({ tab: requested, report, meta, busy, status, onFile, onRemote, onReset, onClose }: Props) {
+export function ImportModal({ tab: requested, report, meta, busy, status, onFile, onRemote, onReset, onCancel, onClose }: Props) {
   const [tab, setTab] = useState(requested);
   const [drag, setDrag] = useState(false);
   const [url, setUrl] = useState('https://sphbank.ir/hr');
@@ -44,12 +46,15 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
     <Modal onClose={onClose} maxWidth="max-w-3xl" labelledBy="import-title">
       <ModalHeader id="import-title" title="داده‌های سامانه" subtitle="بارگذاری فایل اکسل مراکز طرف قرارداد یا مشاهدهٔ گزارش استخراج" onClose={onClose} />
 
-      <div className="flex gap-1 border-b border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-6">
+      <div role="tablist" aria-label="بخش‌های پنجرهٔ داده" className="flex gap-1 border-b border-slate-100 bg-slate-50/70 px-4 py-3 sm:px-6">
         {([['import', 'بارگذاری فایل'], ['report', 'گزارش بررسی اکسل']] as const).map(([k, l]) => (
           <button
             key={k}
+            role="tab"
+            id={`data-tab-${k}`}
+            aria-selected={tab === k}
+            aria-controls="data-tabpanel"
             onClick={() => setTab(k)}
-            aria-current={tab === k}
             className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
               tab === k ? 'bg-white text-ink-900 shadow-sm ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-800'
             }`}
@@ -59,7 +64,7 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
         ))}
       </div>
 
-      <div className="overflow-y-auto p-5 sm:p-6">
+      <div id="data-tabpanel" role="tabpanel" aria-labelledby={`data-tab-${tab}`} className="overflow-y-auto p-5 sm:p-6">
         {tab === 'import' && (
           <div className="space-y-6">
             <div
@@ -103,6 +108,22 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
               )}
             </div>
 
+            {busy && onCancel && (
+              <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
+                <span className="flex items-center gap-2 font-medium text-ink-700">
+                  <Spinner className="h-4 w-4" /> دریافت در جریان است…
+                </span>
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                >
+                  لغو دریافت
+                </button>
+                <span className="text-xs text-slate-500">بستن پنجره هم درخواست را لغو می‌کند.</span>
+              </div>
+            )}
+
             <div>
               <label htmlFor="remote-url" className="mb-2 block text-sm font-semibold text-slate-700">
                 یا دریافت آنلاین از آدرس صفحه / فایل
@@ -124,7 +145,7 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
                   <Icon name="download" className="h-4 w-4" /> دریافت
                 </button>
               </div>
-              <p className="mt-2 text-xs leading-6 text-slate-400">
+              <p className="mt-2 text-xs leading-6 text-slate-500">
                 اگر سرور مبدأ دسترسی بین‌دامنه‌ای (CORS) را مجاز نکرده باشد، دریافت آنلاین ممکن است ناموفق باشد؛ در این صورت فایل را دانلود و از بخش بالا بارگذاری کنید.
               </p>
             </div>

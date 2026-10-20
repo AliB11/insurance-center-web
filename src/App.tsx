@@ -15,11 +15,22 @@ import { MAX_FILE_BYTES, parseWorkbook, type Center, type SheetReport } from './
 import { DATA_SCOPE, scopeLabel } from './lib/scope';
 import { applyFilters, categoryEmoji, countBy, EMPTY_FILTERS, placeLabel, relevance, tokensOf, type Filters } from './lib/search';
 import { catTheme } from './lib/theme';
-import { clearStored, loadList, loadStored, saveData, saveList, type Meta } from './lib/storage';
+import {
+  clearLegacyFavs, clearStored, loadFavs, loadList, loadStoredState, saveData, saveFavs, saveList,
+  type FavMap, type Meta, type StoredState,
+} from './lib/storage';
 import { fmtNum, norm, toFa } from './lib/text';
 
 type Sort = 'relevance' | 'name' | 'province';
-const favKey = (c: Center) => `${c.nameN}#${norm(c.address).slice(0, 30)}`;
+/**
+ * کلید علاقه‌مندی با کل آدرس و شهر ساخته می‌شود (نسخهٔ قبلی ۳۰ کاراکتر اول را
+ * می‌گرفت و دو مرکز هم‌نام در یک خیابان یک کلید مشترک داشتند).
+ */
+const favKey = (c: Center) => `${c.nameN}#${norm(c.address)}#${norm(c.city)}`;
+/** کلید نسخهٔ قبلی (۳۰ کاراکتر اول آدرس) فقط برای انتقال یک‌بارهٔ علاقه‌مندی‌ها */
+const legacyFavKey = (c: Center) => `${c.nameN}#${norm(c.address).slice(0, 30)}`;
+/** مجموعهٔ داده؛ علاقه‌مندی‌ها به همان فایل محدود می‌شوند و روی فایل بعدی نمی‌نشینند. */
+const datasetIdOf = (m: Meta | null) => (m ? `${m.source}:${m.fileName}` : '');
 const SOURCE_LABEL: Record<Meta['source'], string> = {
   local: 'فایل همراه برنامه',
   upload: 'بارگذاری دستی',
@@ -33,6 +44,7 @@ export default function App() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [booting, setBooting] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [remoteBusy, setRemoteBusy] = useState(false);
   const [status, setStatus] = useState('در حال آماده‌سازی داده‌ها...');
   const [modal, setModal] = useState<null | 'import' | 'report'>(null);
 
@@ -47,7 +59,9 @@ export default function App() {
   const operation = useRef(false);
   const [detail, setDetail] = useState<Center | null>(null);
   const [toast, setToast] = useState('');
-  const [favKeys, setFavKeys] = useState<Set<string>>(() => new Set(loadList('sepah-favs', [])));
+  const [favStore] = useState(() => loadFavs());
+  const [favMap, setFavMap] = useState<FavMap>(favStore.map);
+  const [legacyFavs, setLegacyFavs] = useState<string[]>(favStore.legacy);
   const [recent, setRecent] = useState<string[]>(() => loadList('sepah-recent', []));
   const [showTop, setShowTop] = useState(false);
   const [compact, setCompact] = useState(false);
@@ -59,13 +73,18 @@ export default function App() {
   const headerRef = useRef<HTMLElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const toastTimer = useRef<number | undefined>(undefined);
+  /** لغو درخواست دریافت آنلاین با بستن پنجره یا دکمهٔ «لغو» */
+  const importAbort = useRef<AbortController | null>(null);
 
   const flash = useCallback((m: string, ms = 2600) => {
     setToast(m);
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(''), ms);
   }, []);
-  useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+  useEffect(() => () => {
+    window.clearTimeout(toastTimer.current);
+    importAbort.current?.abort();
+  }, []);
 
   const ingest = useCallback(async (buf: ArrayBuffer, name: string, source: Meta['source']) => {
     setStatus('در حال تحلیل و استخراج مراکز از تمام شیت‌ها...');
@@ -101,44 +120,70 @@ export default function App() {
     setBooting(false);
   }, []);
 
-  // ---------- boot: فایل ذخیره‌شده → فایل همراه برنامه → دادهٔ نمونه ----------
-  useEffect(() => {
-    let alive = true;
-    const controller = new AbortController();
-    (async () => {
-      try {
-        const loaded = await loadStored();
-        if (alive && loaded?.centers.length && loaded.meta?.source && loaded.meta.source !== 'demo') {
-          // دادهٔ نسخه‌های قبل (مثلاً استانِ حدس‌زده از «بزرگراه کردستان») با قواعد فعلی اصلاح می‌شود
-          const migration = migrateStored(loaded);
-          const stored = migration.data;
-          setCenters(stored.centers);
-          setReport(stored.report);
-          setMeta(stored.meta);
-          setStatus(`${fmtNum(stored.centers.length)} مرکز از حافظهٔ مرورگر بازیابی شد.`);
-          setBooting(false);
-          if (migration.changed) {
-            const saved = await saveData(stored);
-            const message = migrationMessage(migration.summary);
-            if (alive && message) flash(saved ? message : `${message} (ذخیرهٔ مرورگر ممکن نشد)`, 6000);
-          }
-          return;
-        }
-        if (!alive) return;
-        setStatus('در حال جستجوی فایل داده در مسیر برنامه...');
-        const local = await tryLocal(controller.signal);
-        if (!alive) return;
-        if (local) {
-          const ok = await ingest(local.buf, local.name, 'local');
-          if (ok) { setBooting(false); return; }
-        }
-        loadDemo();
-      } catch {
-        if (alive) { loadDemo(); flash('فایل همراه برنامه قابل خواندن نبود؛ دادهٔ نمونه نمایش داده شد.'); }
+  /**
+   * بارگذاری اولیه/بازیابی: دادهٔ ذخیره‌شده → فایل همراه برنامه → دادهٔ نمونه.
+   * پس از «حذف داده» هم دوباره اجرا می‌شود تا کاربر به بن‌بست «فایلی بارگذاری نشد» نرسد.
+   */
+  const bootstrap = useCallback(async (signal?: AbortSignal) => {
+    const alive = () => !signal?.aborted;
+    setStatus('در حال آماده‌سازی داده‌ها...');
+    let state: StoredState | null = null;
+    try {
+      state = await loadStoredState();
+    } catch {
+      state = { state: 'error', message: 'Storage unavailable' };
+    }
+    if (!alive()) return;
+    if (state.state === 'ok' && state.data.centers.length && state.data.meta.source !== 'demo') {
+      // دادهٔ نسخه‌های قبل (مثلاً استانِ حدس‌زده از «بزرگراه کردستان») با قواعد فعلی اصلاح می‌شود
+      const migration = migrateStored(state.data);
+      const stored = migration.data;
+      setCenters(stored.centers);
+      setReport(stored.report);
+      setMeta(stored.meta);
+      setStatus(`${fmtNum(stored.centers.length)} مرکز از حافظهٔ مرورگر بازیابی شد.`);
+      setBooting(false);
+      if (migration.changed || state.repaired) {
+        const saved = await saveData(stored);
+        const parts = [
+          migration.changed ? migrationMessage(migration.summary) : '',
+          state.repaired ? 'دادهٔ ذخیره‌شده با قالب فعلی بازسازی شد.' : '',
+        ].filter(Boolean);
+        const message = parts.join(' ');
+        if (alive() && message) flash(saved ? message : `${message} (ذخیرهٔ مرورگر ممکن نشد)`, 6000);
       }
-    })();
-    return () => { alive = false; controller.abort(); };
+      return;
+    }
+    // دادهٔ ذخیره‌شده خراب بود: هیچ‌چیز روی آن نوشته نمی‌شود و به کاربر گفته می‌شود.
+    const storedProblem = state.state === 'error'
+      ? `خواندن دادهٔ ذخیره‌شده ممکن نشد (${state.message}).`
+      : state.state === 'invalid'
+        ? 'دادهٔ ذخیره‌شدهٔ قبلی قابل خواندن نبود.'
+        : '';
+    if (storedProblem) {
+      setStatus(`${storedProblem} دادهٔ قبلی پاک نشد؛ در صورت نیاز، دوباره فایل را بارگذاری کنید.`);
+      flash(`${storedProblem} دادهٔ قبلی حذف نشد.`, 7000);
+    }
+    setStatus('در حال جستجوی فایل داده در مسیر برنامه...');
+    try {
+      const local = await tryLocal(signal);
+      if (!alive()) return;
+      if (local) {
+        const ok = await ingest(local.buf, local.name, 'local');
+        if (ok) { setBooting(false); return; }
+      }
+      loadDemo();
+    } catch {
+      if (alive()) { loadDemo(); flash('فایل همراه برنامه قابل خواندن نبود؛ دادهٔ نمونه نمایش داده شد.'); }
+    }
   }, [ingest, loadDemo, flash]);
+
+  // ---------- boot ----------
+  useEffect(() => {
+    const controller = new AbortController();
+    void bootstrap(controller.signal);
+    return () => controller.abort();
+  }, [bootstrap]);
 
   // ---------- ارتفاع نوار بالا (برای چسبندگی صحیح لایه‌ها) ----------
   useLayoutEffect(() => {
@@ -211,8 +256,13 @@ export default function App() {
     operation.current = true;
     setBusy(true);
     setStatus('در حال اتصال...');
+    const controller = new AbortController();
+    importAbort.current = controller;
+    setRemoteBusy(true);
     try {
-      const r = await tryRemote(url.trim(), setStatus);
+      const r = await tryRemote(url.trim(), setStatus, controller.signal);
+      // بستن پنجره یا «لغو» درخواست را قطع می‌کند؛ نتیجهٔ دیررس نباید داده را عوض کند
+      if (controller.signal.aborted) { setStatus('دریافت آنلاین لغو شد.'); return; }
       if (r) {
         const ok = await ingest(r.buf, r.name, 'remote');
         if (ok) setModal('report');
@@ -220,10 +270,31 @@ export default function App() {
         setStatus('دریافت آنلاین ناموفق بود (محدودیت CORS، شبکه یا فایل نامعتبر). فایل را دانلود و بارگذاری کنید.');
       }
     } catch (error) {
+      if (controller.signal.aborted || (error as Error).name === 'AbortError') {
+        setStatus('دریافت آنلاین لغو شد.');
+        return;
+      }
       setStatus('خطا در دریافت فایل: ' + (error as Error).message);
       flash('دریافت فایل ناموفق بود');
-    } finally { setBusy(false); operation.current = false; }
+    } finally {
+      // اگر کاربر لغو کرده باشد، cancelImport همین حالا وضعیت را پاک کرده است
+      if (importAbort.current === controller) {
+        importAbort.current = null;
+        setRemoteBusy(false);
+        setBusy(false);
+        operation.current = false;
+      }
+    }
   };
+
+  /** لغو دریافت آنلاین (دکمهٔ داخل پنجره یا بستن پنجره) */
+  const cancelImport = useCallback(() => {
+    importAbort.current?.abort();
+    importAbort.current = null;
+    operation.current = false;
+    setRemoteBusy(false);
+    setBusy(false);
+  }, []);
 
   const handleReset = async () => {
     if (operation.current || booting) return;
@@ -234,17 +305,39 @@ export default function App() {
       if (!cleared) { flash('حذف حافظهٔ مرورگر ممکن نشد؛ داده‌ها تغییری نکردند.'); return; }
       setCenters([]); setReport([]); setMeta(null); setDetail(null); setRouting(null);
       setFilters(EMPTY_FILTERS);
-      setStatus('دادهٔ ذخیره‌شده حذف شد.');
-      flash('دادهٔ ذخیره‌شده حذف شد');
+      flash('دادهٔ ذخیره‌شده حذف شد؛ فایل همراه برنامه دوباره بررسی می‌شود.');
+      // بدون این، کاربر روی صفحهٔ «فایلی بارگذاری نشد» می‌ماند و باید دستی صفحه را تازه می‌کرد
+      setModal(null);
+      setBooting(true);
+      await bootstrap();
     } finally { setBusy(false); operation.current = false; }
   };
 
   // ---------- derived data ----------
   const byId = useMemo(() => new Map(centers.map((c) => [c.id, c])), [centers]);
+  const datasetId = datasetIdOf(meta);
+  const favKeys = useMemo(() => new Set((datasetId && favMap[datasetId]) || []), [favMap, datasetId]);
   const favIds = useMemo(
     () => new Set(centers.filter((c) => favKeys.has(favKey(c))).map((c) => c.id)),
     [centers, favKeys],
   );
+  // انتقال یک‌بارهٔ علاقه‌مندی‌های نسخهٔ قبل به کلید نسخه‌دار و مجموعهٔ همین فایل
+  useEffect(() => {
+    if (!datasetId || !legacyFavs.length || !centers.length) return;
+    const byLegacy = new Map(centers.map((c) => [legacyFavKey(c), favKey(c)]));
+    const migrated = [...new Set(legacyFavs.map((k) => byLegacy.get(k)).filter((k): k is string => !!k))];
+    const existing = favMap[datasetId] ?? [];
+    const merged = [...new Set([...existing, ...migrated])];
+    if (merged.length > existing.length) {
+      const updated: FavMap = { ...favMap, [datasetId]: merged };
+      setFavMap(updated);
+      saveFavs(updated);
+    }
+    // بعد از انتقال، فهرست قدیمی پاک می‌شود؛ وگرنه حذف یک علاقه‌مندی آن را برمی‌گرداند
+    clearLegacyFavs();
+    setLegacyFavs([]);
+  }, [datasetId, legacyFavs, centers, favMap]);
+
   const dq = useDeferredValue(filters);
   const tokens = useMemo(() => tokensOf(dq.q), [dq.q]);
 
@@ -283,15 +376,14 @@ export default function App() {
   const set = useCallback((patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch })), []);
   const toggleFav = (id: number) => {
     const c = byId.get(id);
-    if (!c) return;
-    setFavKeys((s) => {
-      const n = new Set(s);
-      const k = favKey(c);
-      if (n.has(k)) n.delete(k);
-      else n.add(k);
-      saveList('sepah-favs', Array.from(n));
-      return n;
-    });
+    if (!c || !datasetId) return;
+    // نوشتن در localStorage بیرون از updater انجام می‌شود (updater باید خالص بماند)
+    const key = favKey(c);
+    const current = favMap[datasetId] ?? [];
+    const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
+    const updated: FavMap = { ...favMap, [datasetId]: next };
+    setFavMap(updated);
+    saveFavs(updated);
   };
   const copy = (t: string) => {
     if (!navigator.clipboard) {
@@ -413,6 +505,7 @@ export default function App() {
             <button
               onClick={() => { set({ favOnly: !filters.favOnly }); scrollToResults(); }}
               aria-pressed={filters.favOnly}
+              aria-label={filters.favOnly ? 'نمایش همهٔ مراکز (خاموش‌کردن فیلتر علاقه‌مندی‌ها)' : 'نمایش فقط علاقه‌مندی‌ها'}
               className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 transition ${
                 filters.favOnly ? 'bg-gold-300 text-ink-950' : 'bg-white/10 hover:bg-white/20'
               }`}
@@ -466,7 +559,7 @@ export default function App() {
       </div>
 
       {/* ======================= بنر ======================= */}
-      <section className="relative isolate overflow-hidden bg-ink-900 pb-32 pt-10 text-white sm:pb-40 sm:pt-14">
+      <section className="relative isolate overflow-hidden bg-ink-900 pb-32 pt-10 text-white print:hidden sm:pb-40 sm:pt-14">
         {/* بافت و نورهای پس‌زمینه */}
         <div
           className="pointer-events-none absolute inset-0 opacity-[0.18]"
@@ -684,7 +777,7 @@ export default function App() {
             <div
               ref={resultsRef}
               style={{ scrollMarginTop: barH + 76 }}
-              className="mt-6 grid gap-6 lg:grid-cols-[18rem_1fr]"
+              className="mt-6 grid gap-6 lg:grid-cols-[18rem_1fr] print:block"
             >
               <aside className="no-print hidden lg:block">
                 <div className="sticky rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200" style={{ top: barH + 16 }}>
@@ -715,7 +808,7 @@ export default function App() {
                       <Icon name="filter" className="h-4 w-4" /> فیلتر
                       {activeCount > 0 && <span className="rounded-full bg-ink-800 px-1.5 text-xs text-white">{toFa(activeCount)}</span>}
                     </button>
-                    <p className="text-sm text-slate-600">
+                    <p role="status" aria-live="polite" aria-atomic="true" className="text-sm text-slate-600">
                       <b className="text-lg tabular-nums text-ink-900">{fmtNum(results.length)}</b> مرکز یافت شد
                     </p>
                   </div>
@@ -838,8 +931,8 @@ export default function App() {
                     ))}
                   </div>
                 ) : (
-                  <div className="print-plain overflow-x-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
-                    <table className="w-full min-w-[760px] text-right text-sm">
+                  <div className="print-plain overflow-x-auto rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 print:overflow-visible">
+                    <table className="w-full min-w-[760px] text-right text-sm print:min-w-0">
                       <thead className="sticky bg-slate-50 text-xs text-slate-500" style={{ top: barH + 62 }}>
                         <tr>
                           {['', 'نام مرکز', 'دسته', soleProvince ? 'شهر' : 'استان / شهر', 'آدرس', 'تلفن', ''].map((h, i) => (
@@ -1007,7 +1100,8 @@ export default function App() {
           onFile={handleFile}
           onRemote={handleRemote}
           onReset={handleReset}
-          onClose={() => setModal(null)}
+          onCancel={remoteBusy ? cancelImport : undefined}
+          onClose={() => { if (busy) cancelImport(); setModal(null); }}
         />
       )}
 

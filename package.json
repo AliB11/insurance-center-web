@@ -1,18 +1,19 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "insurance-center-web",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.checks.json --noEmit",
     "check": "npm run typecheck && npm run check:logic && npm run check:regression && npm run check:ui",
     "check:logic": "esbuild checks/logic-check.tsx --bundle --format=cjs --platform=node --packages=external --outfile=.check/logic.cjs --log-level=warning && node .check/logic.cjs",
     "check:ui": "esbuild checks/ui-check.tsx --bundle --format=cjs --platform=node --packages=external --outfile=.check/ui.cjs --log-level=warning && node .check/ui.cjs",
     "check:regression": "esbuild checks/regression-check.ts --bundle --format=cjs --platform=node --packages=external --outfile=.check/regression.cjs --log-level=warning && node .check/regression.cjs",
-    "check:browser": "node checks/browser-check.mjs"
+    "check:browser": "node checks/browser-check.mjs",
+    "check:all": "npm run check && npm run check:browser"
   },
   "dependencies": {
     "@fontsource/vazirmatn": "5.3.0",
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@sparticuz/chromium": "153.0.0",
     "@tailwindcss/vite": "4.1.17",
+    "@types/jsdom": "^27.0.0",
     "@types/node": "22.19.17",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
@@ -35,5 +37,9 @@
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.3.7"
+  },
+  "description": "سامانهٔ جستجوی مراکز طرف قرارداد بیمهٔ تکمیلی بانک سپه (استان تهران) — React + TypeScript، بدون بک‌اند",
+  "engines": {
+    "node": ">=22.12"
   }
 }

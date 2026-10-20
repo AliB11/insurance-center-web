@@ -17,7 +17,7 @@
  */
 import { clean, norm } from './text';
 import { coordinateSanity, distanceKm, validCoordinates, type Coordinates } from './routing';
-import { DATA_SCOPE, inScopeBox, type DataScope } from './scope';
+import { DATA_SCOPE, canonicalCity, citiesInScope, inScopeBox, type DataScope } from './scope';
 
 export type GeoSource = 'neshan' | 'nominatim';
 
@@ -60,15 +60,42 @@ interface RawHit {
 export const geoConfig = { timeoutMs: 12_000 };
 const TIMEOUT_MESSAGE = 'پاسخی از سرویس در ۱۲ ثانیه نرسید؛ اتصال شبکه را بررسی و دوباره امتحان کنید.';
 const MAX_BODY_CHARS = 400_000;
-/** Peer-distance thresholds in km: beyond `reject` the answer belongs to another settlement. */
-const PEER_REJECT_KM = 80;
-const PEER_WARN_KM = 40;
+/**
+ * Peer-distance thresholds in km for centers of the *same city*: beyond `reject` the
+ * answer belongs to another settlement. 80 km was wider than the whole province, so a
+ * point in Varamin (≈45 km) passed as a Tehran center.
+ */
+const PEER_REJECT_KM = 30;
+const PEER_WARN_KM = 12;
 
 export function neshanAddressQuery(t: GeoTarget): string {
   return clean([t.province, t.city, t.address].filter(Boolean).join(' '));
 }
 export function nominatimQuery(t: GeoTarget): string {
   return clean([t.name, t.city, t.address].filter(Boolean).join(' '));
+}
+
+/** Reads a response body with a hard size cap instead of buffering everything first. */
+async function readCappedText(response: Response): Promise<string> {
+  const declared = Number(response.headers.get('content-length'));
+  if (declared > MAX_BODY_CHARS) throw new Error('HTTP:0');
+  if (!response.body) {
+    const text = await response.text();
+    return text.length > MAX_BODY_CHARS ? '' : text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  let out = '';
+  let size = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_CHARS) { await reader.cancel(); throw new Error('HTTP:0'); }
+    out += decoder.decode(value, { stream: true });
+    if (out.length > MAX_BODY_CHARS) { await reader.cancel(); throw new Error('HTTP:0'); }
+  }
+  return out + decoder.decode();
 }
 
 /**
@@ -86,8 +113,8 @@ async function getJson(url: string, headers: Record<string, string>, signal?: Ab
   try {
     const response = await fetch(url, { signal: controller.signal, headers, credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP:${response.status}`);
-    const text = await response.text();
-    if (!text || text.length > MAX_BODY_CHARS) throw new Error('HTTP:0');
+    const text = await readCappedText(response);
+    if (!text) throw new Error('HTTP:0');
     return JSON.parse(text);
   } catch (error) {
     if (signal?.aborted) throw new Error('ABORT');
@@ -230,12 +257,59 @@ export function peerAnchors(centers: { city: string; coordinates?: Coordinates }
   return out;
 }
 
+const CITY_SEP = /[.،,؛;|/()\-–—:：]/;
+
+function labelSegments(text: string): string[] {
+  return norm(text)
+    .split(CITY_SEP)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * شهرهایی که یک پاسخ به آن‌ها نسبت داده شده است. `hit.city` مقدم است؛ اگر نبود،
+ * بخش‌های برچسب بررسی می‌شوند و بخشِ نخست اگر نام/«استان» همان استان باشد کنار
+ * گذاشته می‌شود — وگرنه «تهران، ورامین» به‌اشتباه «تهران» شمرده می‌شد و پاسخِ
+ * شهر دیگری در همان استان تأیید می‌شد.
+ */
+function hitCities(hit: RawHit, scope: DataScope | null): string[] {
+  const out: string[] = [];
+  const add = (name: string) => {
+    if (name && !out.includes(name)) out.push(name);
+  };
+  const addCity = (value: string) => {
+    const canonical = canonicalCity(value, scope);
+    const known = citiesInScope(canonical, scope);
+    if (known.length) known.forEach(add);
+    else if (!scope) add(canonical);
+  };
+  if (hit.city) addCity(hit.city);
+  if (!scope) return out;
+  const province = norm(scope.province);
+  const segments = labelSegments(hit.label ?? '');
+  const head = segments[0];
+  if (head && (head === province || head === `استان ${province}`)) segments.shift();
+  for (const segment of segments) for (const city of citiesInScope(segment, scope)) add(city);
+  return out;
+}
+
+/** برچسب بدون پیشوند استان، برای وقتی که هیچ شهر شناخته‌شده‌ای در پاسخ نیست. */
+function haystackCityOnly(hit: RawHit, scope: DataScope | null): string {
+  const segments = labelSegments(hit.label ?? '');
+  if (scope) {
+    const province = norm(scope.province);
+    const head = segments[0];
+    if (head && (head === province || head === `استان ${province}`)) segments.shift();
+  }
+  return norm([hit.city, ...segments].filter(Boolean).join(' '));
+}
+
 /**
  * Pure vetting step: every provider answer passes here before reaching the UI.
  * Rejection reasons are surfaced to the user; accepted points still need one human click.
  */
 export function vetHits(hits: RawHit[], t: GeoTarget, peers: Coordinates[], source: GeoSource, scope: DataScope | null = DATA_SCOPE): GeoCandidate[] {
-  const wantCity = t.city ? norm(t.city) : '';
+  const wantCity = t.city ? norm(canonicalCity(t.city, scope) || t.city) : '';
   const wantProvince = t.province ? norm(t.province.replace(/^استان\s*/, '')) : '';
   const box = targetScope(t, scope);
   return hits.map((hit) => {
@@ -249,10 +323,18 @@ export function vetHits(hits: RawHit[], t: GeoTarget, peers: Coordinates[], sour
     if (box && !inScopeBox(point, box)) {
       return { ...base, cityMatch: false, provinceMatch: false, accepted: false, reason: `این نقطه بیرون از محدودهٔ استان ${box.province} است؛ احتمالاً پاسخ مربوط به خیابان یا شهر دیگری با نام مشابه است (مثل «بزرگراه کردستان» تهران و استان کردستان)` };
     }
-    const haystackCity = norm([hit.city, hit.label].filter(Boolean).join(' '));
     const haystackProvince = norm([hit.province, hit.label].filter(Boolean).join(' '));
-    const cityMatch = !wantCity || haystackCity.includes(wantCity);
     const provinceMatch = !wantProvince || haystackProvince.includes(wantProvince);
+    const namedCities = hitCities(hit, scope);
+    // هیچ شهر شناخته‌شده‌ای در پاسخ نیست (مثلاً پاسخ قدیمی v4 بدون جزئیات): نبودِ
+    // اطلاعات با «شهر متفاوت» یکی نیست؛ با هشدار پذیرفته می‌شود تا بررسی دستی شود.
+    const cityUnknown = !!wantCity && namedCities.length === 0 && provinceMatch
+      && !haystackCityOnly(hit, scope).includes(wantCity);
+    // «تهران، ورامین» باید رد شود: برچسب همهٔ پاسخ‌ها با نام استان شروع می‌شود، پس
+    // تطبیق «شامل بودن» شهرِ مرکز در برچسب همیشه درست بود و پاسخ شهر دیگر را می‌پذیرفت.
+    const cityMatch = !wantCity || cityUnknown || (namedCities.length
+      ? namedCities.some((c) => norm(c) === wantCity)
+      : haystackCityOnly(hit, scope).includes(wantCity));
     let nearPeerKm: number | undefined;
     let reason: string | undefined;
     if (peers.length) {
@@ -261,8 +343,10 @@ export function vetHits(hits: RawHit[], t: GeoTarget, peers: Coordinates[], sour
         reason = `حدوداً ${Math.round(nearPeerKm)} کیلومتر از مراکز هم‌شهر این نقطه فاصله دارد؛ احتمالاً پاسخ برای شهر دیگری با نام مشابه است`;
       }
     }
-    if (!reason && !cityMatch) reason = 'نام شهرِ پاسخ با شهر مرکز یکسان نبود؛ حتماً دستی بررسی کنید';
-    if (!reason && !provinceMatch) reason = 'نام استانِ پاسخ با استان مرکز یکسان نبود؛ حتماً دستی بررسی کنید';
+    if (!reason && !cityMatch && !provinceMatch) reason = 'نام استان و شهرِ پاسخ با مرکز یکسان نبود؛ حتماً دستی بررسی کنید';
+    else if (!reason && !cityMatch) reason = 'نام شهرِ پاسخ با شهر مرکز یکسان نبود؛ حتماً دستی بررسی کنید';
+    else if (!reason && !provinceMatch) reason = 'نام استانِ پاسخ با استان مرکز یکسان نبود؛ حتماً دستی بررسی کنید';
+    if (!reason && cityUnknown) reason = 'سرویس نام شهر را برنگرداند؛ پیش از تأیید، محل را روی نقشه بررسی کنید';
     const accepted = cityMatch && provinceMatch && (!nearPeerKm || nearPeerKm <= PEER_REJECT_KM);
     if (accepted && nearPeerKm !== undefined && nearPeerKm > PEER_WARN_KM) {
       reason = `نسبتاً دور از دیگر مراکز این شهر (حدوداً ${Math.round(nearPeerKm)} کیلومتر)؛ پیش از تأیید نگاهی به نقشه بیندازید`;

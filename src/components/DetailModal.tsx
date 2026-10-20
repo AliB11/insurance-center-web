@@ -97,7 +97,7 @@ export function DetailModal({ c, fav, onFav, onClose, onCopy, onRoute }: Props) 
           </dl>
         )}
 
-        <p className="text-xs text-slate-400">منبع: شیت «{c.sheet}» فایل مراکز طرف قرارداد</p>
+        <p className="text-xs text-slate-500">منبع: شیت «{c.sheet}» فایل مراکز طرف قرارداد</p>
       </div>
 
       <div className="flex flex-wrap gap-2 border-t border-slate-100 bg-slate-50 p-4">

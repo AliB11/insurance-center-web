@@ -153,4 +153,5 @@ details > summary::-webkit-details-marker {
   article { break-inside: avoid; animation: none !important; }
   article button, article > div:last-child { display: none !important; }
   thead { position: static !important; }
+  tr { break-inside: avoid; }
 }

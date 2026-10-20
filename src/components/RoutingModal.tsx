@@ -202,7 +202,7 @@ export function RoutingModal({ c, demo, peers = [], onClose, onCopy }: Props) {
                 >پاک کردن کلید</button>
               </div>
             </div>
-            <p className="mt-2 text-[11px] leading-5 text-slate-400">
+            <p className="mt-2 text-xs leading-5 text-slate-500">
               کلید فقط در حافظهٔ همین مرورگر می‌ماند و مستقیم به api.neshan.org ارسال می‌شود؛ برای دادهٔ حساس، کلید دامنه‌قفل و سهمیه‌کم انتخاب کنید
               {keySaved ? ' — کلید ذخیره‌شده است.' : '.'}
             </p>

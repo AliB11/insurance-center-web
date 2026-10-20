@@ -8,9 +8,9 @@ import {
 import {
   parseNeshanGeocode, parseNominatimHits, vetHits, neshanAddressQuery, neshanErrorMessage, lookupCandidates, geoConfig,
 } from '../src/lib/geocode';
-import { validStoredData, loadList, type StoredData } from '../src/lib/storage';
+import { validStoredData, normalizeStoredData, loadList, type StoredData } from '../src/lib/storage';
 import { detectProvince, exactProvince, explicitProvince } from '../src/lib/geo';
-import { canonicalCity, detectScopeCity, TEHRAN_SCOPE } from '../src/lib/scope';
+import { canonicalCity, citiesInScope, detectScopeCity, TEHRAN_SCOPE } from '../src/lib/scope';
 import { DATA_SCHEMA, migrateStored } from '../src/lib/migrate';
 import { tryRemote, tryLocal, remoteUrl } from '../src/lib/loader';
 import { parsePhones, highlightRanges, phonesFromText, compactTerm } from '../src/lib/text';
@@ -206,6 +206,74 @@ check('single-cell row «داروخانه البرز» is a center, not a provin
   assert.deepEqual(result.centers.map((c) => c.name), ['مرکز الف', 'داروخانه البرز', 'مرکز ب']);
   assert.ok(result.centers.every((c) => c.province === 'تهران'));
 });
+check('single-cell category headings («بیمارستان‌ها») are not centers', () => {
+  const result = parseWorkbook(workbook([
+    ['نام مرکز', 'آدرس', 'تلفن'],
+    ['بیمارستان‌ها'],
+    ['بیمارستان الف', 'خیابان آزادی', '88776655'],
+    ['داروخانه ها'],
+    ['داروخانه ب', 'خیابان ولیعصر', '66554433'],
+    ['مراکز تصویربرداری'],
+    ['مرکز تصویربرداری پارس', 'خیابان ونک', '88776600'],
+    ['آزمایشگاهها'],
+    ['آزمایشگاه رازی', 'خیابان کارگر', '66551122'],
+  ]));
+  assert.deepEqual(result.centers.map((c) => c.name), [
+    'بیمارستان الف', 'داروخانه ب', 'مرکز تصویربرداری پارس', 'آزمایشگاه رازی',
+  ]);
+  assert.match(result.report[0].notes.join(' '), /عنوانِ دسته/);
+  // عنوان‌ها باید به‌عنوان زمینه در گزارش بیایند، نه داده
+  assert.ok(result.report[0].skipped.some((s) => s.text === 'بیمارستان‌ها'));
+});
+check('a real center named like a category («داروخانه رها») is still a row', () => {
+  const result = parseWorkbook(workbook([
+    ['نام', 'آدرس', 'تلفن'],
+    ['داروخانه رها'],
+    ['مرکز ب', 'خیابان انقلاب', '021-66001133'],
+  ]));
+  assert.ok(result.centers.some((c) => c.name === 'داروخانه رها'));
+});
+check('header-less sheet: short street addresses still land in the address column', () => {
+  const result = parseWorkbook(workbook([
+    ['بیمارستان الف', 'خیابان آزادی، پلاک ۲', '88776655'],
+    ['داروخانه ب', 'خیابان ولیعصر، پلاک ۹', '66554433'],
+  ]));
+  const mapping = result.report[0].mapping;
+  assert.ok(mapping.some((m) => m.field === 'address'), 'address column found by street words');
+  assert.deepEqual(result.centers.map((c) => c.address), ['خیابان آزادی، پلاک ۲', 'خیابان ولیعصر، پلاک ۹']);
+});
+check('stored data missing new fields is repaired instead of discarded', () => {
+  const legacy = {
+    centers: [{
+      id: 0, name: 'مرکز قدیمی', category: '', sheet: 'مراکز', province: 'تهران', city: 'تهران',
+      address: 'خیابان آزادی', phones: [{ label: '88776655', tel: '88776655' }],
+      kind: '', service: '', discount: '', desc: '', extra: {},
+      // فیلدهای مشتق‌شده اصلاً وجود ندارند (مثل افزودن فیلد تازه به Center در آینده)
+    }],
+    report: [{ sheet: 'مراکز', category: 'مراکز', rows: 1, imported: 1, headerRow: null, notes: [], mapping: [], skipped: [] }],
+    meta: { fileName: 'old.xlsx', source: 'upload', loadedAt: 1, size: 1 },
+  };
+  assert.equal(validStoredData(legacy), false, 'missing derived fields fail strict validation');
+  const fixed = normalizeStoredData(legacy);
+  assert.ok(fixed, 'normalizer recovers the record');
+  assert.equal(fixed!.centers[0].category, 'سایر');
+  assert.equal(fixed!.centers[0].nameN, 'مرکز قدیمی');
+  assert.ok(fixed!.centers[0].search.includes('خیابان'), 'search index rebuilt from the fields');
+  assert.equal(fixed!.centers[0].locN, 'تهران تهران');
+  assert.equal(normalizeStoredData({ centers: [null, 'x'] }), null, 'nothing usable stays unreadable');
+});
+check('citiesInScope does not confuse the province prefix with a city', () => {
+  assert.deepEqual(citiesInScope('تهران، ورامین، محله', TEHRAN_SCOPE), ['تهران', 'ورامین']);
+  assert.deepEqual(citiesInScope('شهر قدس', TEHRAN_SCOPE), ['قدس']);
+  assert.deepEqual(citiesInScope('کرج', TEHRAN_SCOPE), []);
+  assert.deepEqual(citiesInScope('خیابان شهریار', TEHRAN_SCOPE), ['شهریار'], 'named after a city, still a token');
+});
+check('workbook-wide limits: too many sheets are rejected', () => {
+  const book = XLSX.utils.book_new();
+  for (let i = 0; i < 61; i++) XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['نام', 'آدرس'], ['مرکز', 'خیابان آزادی']]), `s${i}`);
+  const buffer = XLSX.write(book, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+  assert.throws(() => parseWorkbook(buffer), /تعداد شیت/);
+});
 check('city comes from the start of the address only when explicit', () => {
   const cases: [string, string][] = [
     ['شهریار، خیابان ولیعصر', 'شهریار'],
@@ -400,12 +468,41 @@ check('vet accepts same-city answer near peers and warns when far-ish', () => {
   const good = vetHits([{ lat: 35.7, lng: 51.39, label: 'تهران، خیابان کمیل', city: 'تهران', province: 'تهران' }], tehran, peers, 'neshan');
   assert.equal(good[0].accepted, true);
   assert.equal(good[0].reason, undefined);
-  const far = vetHits([{ lat: 35.7, lng: 51.9, label: 'تهران، ورامین', city: 'تهران', province: 'تهران' }], tehran, peers, 'neshan');
+  // ~14km within Tehran: accepted but flagged; ~43km belongs to another settlement
+  const far = vetHits([{ lat: 35.7, lng: 51.55, label: 'تهران، تهران', city: 'تهران', province: 'تهران' }], tehran, peers, 'neshan');
   assert.equal(far[0].accepted, true);
   assert.match(far[0].reason ?? '', /نسبتاً دور/);
+  const tooFar = vetHits([{ lat: 35.7, lng: 51.9, label: 'تهران، تهران', city: 'تهران', province: 'تهران' }], tehran, peers, 'neshan');
+  assert.equal(tooFar[0].accepted, false);
+  assert.match(tooFar[0].reason ?? '', /فاصله دارد/);
   const cityMiss = vetHits([{ lat: 35.7, lng: 51.39, label: 'البرز، کرج، کمیل', city: 'کرج', province: 'البرز' }], tehran, [], 'nominatim');
   assert.equal(cityMiss[0].accepted, false);
   assert.match(cityMiss[0].reason ?? '', /شهر/);
+});
+check('vet rejects another city of the same province (province prefix is not a city match)', () => {
+  const peers = [{ lat: 35.69, lng: 51.4 }];
+  // برچسب Nominatim با نام استان شروع می‌شود؛ قبلاً همین برای تطبیق «تهران» کافی بود
+  const labelOnly = vetHits([{ lat: 35.35, lng: 51.65, label: 'تهران، ورامین، محلهٔ نمونه', province: 'تهران' }], tehran, peers, 'nominatim');
+  assert.equal(labelOnly[0].cityMatch, false);
+  assert.equal(labelOnly[0].accepted, false);
+  const withCity = vetHits([{ lat: 35.35, lng: 51.65, label: 'تهران، ورامین', city: 'ورامین', province: 'تهران' }], tehran, [], 'nominatim');
+  assert.equal(withCity[0].accepted, false);
+  // همان پاسخ برای مرکز ورامین پذیرفته است
+  const varamin = vetHits(
+    [{ lat: 35.35, lng: 51.65, label: 'تهران، ورامین', city: 'ورامین', province: 'تهران' }],
+    { name: 'مرکز ورامین', province: 'تهران', city: 'ورامین', address: 'خیابان شهدا' },
+    [],
+    'nominatim',
+  );
+  assert.equal(varamin[0].accepted, true);
+  // نام مستعار «شهر قدس» با شهر «قدس» یکی است
+  const qods = vetHits(
+    [{ lat: 35.72, lng: 51.11, label: 'تهران، شهر قدس', city: 'شهر قدس', province: 'تهران' }],
+    { name: 'مرکز قدس', province: 'تهران', city: 'قدس', address: 'بلوار انقلاب' },
+    [],
+    'nominatim',
+  );
+  assert.equal(qods[0].accepted, true);
 });
 check('vet: an answer outside Tehran province is rejected even without peers', () => {
   const highway = { name: 'بیمارستان الف', province: 'تهران', city: 'تهران', address: 'بزرگراه کردستان، خیابان ۶۴' };
@@ -459,6 +556,22 @@ async function networkTests() {
     globalThis.fetch = async () => new Response('not found');
     assert.equal(await tryRemote('https://example.com/centers.csv'), null);
     console.log('PASS  HTML/plain error pages are never mistaken for CSV data'); count++;
+
+    // پاسخ بسیار بزرگ نباید بی‌نهایت حافظه بگیرد؛ سقف ۴۰۰KB پیش از JSON.parse اعمال می‌شود
+    globalThis.fetch = async () => new Response('x'.repeat(450_000), { headers: { 'content-type': 'application/json' } });
+    await assert.rejects(() => lookupCandidates(tehran, [], { source: 'nominatim' }), /نقشهٔ آزاد/);
+    globalThis.fetch = async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          const chunk = new TextEncoder().encode('x'.repeat(60_000));
+          for (let i = 0; i < 10; i++) controller.enqueue(chunk);
+          controller.close();
+        },
+      });
+      return new Response(stream);
+    };
+    await assert.rejects(() => lookupCandidates(tehran, [], { source: 'nominatim' }), /نقشهٔ آزاد/);
+    console.log('PASS  oversized geocoder responses abort before parsing (declared and streamed)'); count++;
 
     globalThis.fetch = async (input) => {
       calls.push(String(input));
