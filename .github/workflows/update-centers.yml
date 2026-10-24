@@ -1,0 +1,43 @@
+name: Weekly centers update
+
+# هر هفته فایل مراکز طرف قرارداد از sphbank.ir/hr دریافت و در public/data/
+# کامیت می‌شود؛ برنامه هنگام بوت manifest را می‌بیند و دادهٔ کاربران را
+# خودکار به‌روز می‌کند.
+# توجه: گیت‌هاب زمان‌بندی‌ها را پس از ۶۰ روز بی‌فعالیتی مخزن غیرفعال می‌کند؛
+# اجرای دستی (workflow_dispatch) هم فعال است.
+
+on:
+  schedule:
+    - cron: '0 6 * * 6' # شنبه‌ها ۰۶:۰۰ UTC (۹:۳۰ به وقت تهران)
+  workflow_dispatch:
+
+concurrency:
+  group: update-centers
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    name: Fetch centers file from sphbank.ir
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+      - name: Fetch, compare and write manifest
+        run: node scripts/fetch-centers.mjs
+      - name: Commit and push if changed
+        run: |
+          if [ -n "$(git status --porcelain -- public/data)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add public/data
+            git commit -m "data: به‌روزرسانی هفتگی فایل مراکز از sphbank.ir" -m "$(cat public/data/centers.json)"
+            git push
+          else
+            echo "فایل تغییری نکرده است؛ کامیتی لازم نیست."
+          fi

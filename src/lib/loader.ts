@@ -111,3 +111,86 @@ export async function tryRemote(
   }
   return null;
 }
+
+/* ------------------------------------------------------------------ *
+ *  به‌روزرسانی خودکار از فایل همراه برنامه
+ *  گردش‌کار هفتگی GitHub Actions فایل مراکز را از منبع اصلی (sphbank.ir/hr)
+ *  می‌گیرد و همراه یک manifest کوچک در public/data/ کامیت می‌کند. برنامه در
+ *  هر بوت manifest را می‌خواند و اگر از دادهٔ ذخیره‌شدهٔ کاربر تازه‌تر باشد،
+ *  فایل را دریافت و بی‌سروصدا جایگزین می‌کند. (sphbank.ir هدر CORS ندارد،
+ *  پس گرفتن مستقیم از مرورگر همیشه ممکن نیست؛ مسیر مطمئن همان فایل همراه است.)
+ * ------------------------------------------------------------------ */
+
+/** مسیر فایل همراه و manifest آن؛ گردش‌کار weekly این دو را می‌نویسد */
+export const BUNDLED_DATA_FILE = './data/centers.xlsx';
+export const BUNDLED_MANIFEST_FILE = './data/centers.json';
+
+export interface DataManifest {
+  /** زمان نوشتن manifest توسط گردش‌کار (ISO) */
+  updatedAt: string;
+  /** تاریخ انتشار فایل روی منبع (هدر Last-Modified؛ ISO) یا null */
+  publishedAt: string | null;
+  /** اثر SHA-256 محتوای فایل */
+  sha256: string;
+  /** آدرس اصلی فایل روی منبع */
+  source: string;
+  /** نام اصلی فایل روی منبع */
+  fileName: string;
+}
+
+const ISO_RE_DATE = (v: unknown): v is string => typeof v === 'string' && Number.isFinite(Date.parse(v));
+
+/** اعتبارسنجی سخت manifest؛ هر پاسخ مشکوک (HTML خطا، JSON ناقص) دور انداخته می‌شود */
+export function parseManifest(value: unknown): DataManifest | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const m = value as Record<string, unknown>;
+  if (!ISO_RE_DATE(m.updatedAt)) return null;
+  if (typeof m.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(m.sha256)) return null;
+  if (m.publishedAt !== null && m.publishedAt !== undefined && !ISO_RE_DATE(m.publishedAt)) return null;
+  return {
+    updatedAt: m.updatedAt,
+    publishedAt: typeof m.publishedAt === 'string' ? m.publishedAt : null,
+    sha256: m.sha256.toLowerCase(),
+    source: typeof m.source === 'string' ? m.source : '',
+    fileName: typeof m.fileName === 'string' && m.fileName.trim() ? m.fileName : 'centers.xlsx',
+  };
+}
+
+/**
+ * تصمیم به‌روزرسانی: زمان انتشار manifest باید از زمان بارگذاری دادهٔ فعلی کاربر
+ * تازه‌تر باشد. دادهٔ نمونه اصلاً به این تابع نمی‌رسد (در App تفکیک شده).
+ */
+export function isManifestNewer(manifest: DataManifest, current?: { loadedAt: number } | null): boolean {
+  const published = Date.parse(manifest.publishedAt || manifest.updatedAt);
+  if (!Number.isFinite(published)) return false;
+  return !(current && Number.isFinite(current.loadedAt) && current.loadedAt >= published);
+}
+
+/** خواندن manifest فایل همراه؛ هر خطا/نبود = null (به‌روزرسانی خودکار اختیاری است) */
+export async function fetchManifest(signal?: AbortSignal): Promise<DataManifest | null> {
+  try {
+    const controller = new AbortController();
+    let finished = false;
+    const timer = setTimeout(() => { if (!finished) controller.abort(); }, 4000);
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      const response = await fetch(BUNDLED_MANIFEST_FILE, { signal: controller.signal, cache: 'no-cache', credentials: 'omit', referrerPolicy: 'no-referrer' });
+      finished = true;
+      if (!response.ok) return null;
+      const text = await response.text();
+      if (text.length > 4096) return null;
+      return parseManifest(JSON.parse(text));
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    }
+  } catch { return null; }
+}
+
+/** دریافت فایل همراهِ به‌روز (همان مسیری که tryLocal هم می‌پژورد) */
+export async function fetchBundledUpdate(signal?: AbortSignal): Promise<Loaded | null> {
+  const buf = await fetchSpreadsheet(BUNDLED_DATA_FILE, 15000, signal);
+  return buf ? { buf, name: 'centers.xlsx', source: 'local' } : null;
+}

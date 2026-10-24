@@ -9,7 +9,7 @@ import { FilterPanel } from './components/FilterPanel';
 import { ImportModal } from './components/ImportModal';
 import { Highlight, Icon, Kbd, Spinner, Wave } from './components/ui';
 import { DEMO_FILE_NAME, demoCenters } from './lib/demo';
-import { tryLocal, tryRemote } from './lib/loader';
+import { fetchBundledUpdate, fetchManifest, isManifestNewer, tryLocal, tryRemote } from './lib/loader';
 import { DATA_SCHEMA, migrateStored, migrationMessage } from './lib/migrate';
 import { MAX_FILE_BYTES, parseWorkbook, type Center, type SheetReport } from './lib/parser';
 import { DATA_SCOPE, scopeLabel } from './lib/scope';
@@ -121,6 +121,29 @@ export default function App() {
   }, []);
 
   /**
+   * به‌روزرسانی خودکار هفتگی: manifest فایل همراه (public/data/centers.json که
+   * گردش‌کار هفتگی می‌نویسد) را می‌خواند و اگر از دادهٔ ذخیره‌شدهٔ کاربر تازه‌تر
+   * باشد، فایل را دریافت و جایگزین می‌کند. هر خطا بی‌صدا نادیده گرفته می‌شود؛
+   * این مسیر اختیاری است و هرگز نباید بوت یا دادهٔ کاربر را به خطر بیندازد.
+   */
+  const autoUpdate = useCallback(async (current: Meta, signal?: AbortSignal) => {
+    const alive = () => !signal?.aborted;
+    try {
+      if (operation.current) return;
+      const manifest = await fetchManifest(signal);
+      if (!alive() || !manifest || !isManifestNewer(manifest, current) || operation.current) return;
+      operation.current = true;
+      setBusy(true);
+      try {
+        const loaded = await fetchBundledUpdate(signal);
+        if (!alive() || !loaded) return;
+        const ok = await ingest(loaded.buf, manifest.fileName, 'remote');
+        if (ok && alive()) flash('فهرست مراکز از منبع اصلی به‌روزرسانی شد.', 6000);
+      } finally { setBusy(false); operation.current = false; }
+    } catch { /* به‌روزرسانی خودکار اختیاری است */ }
+  }, [ingest, flash]);
+
+  /**
    * بارگذاری اولیه/بازیابی: دادهٔ ذخیره‌شده → فایل همراه برنامه → دادهٔ نمونه.
    * پس از «حذف داده» هم دوباره اجرا می‌شود تا کاربر به بن‌بست «فایلی بارگذاری نشد» نرسد.
    */
@@ -143,6 +166,9 @@ export default function App() {
       setMeta(stored.meta);
       setStatus(`${fmtNum(stored.centers.length)} مرکز از حافظهٔ مرورگر بازیابی شد.`);
       setBooting(false);
+      // به‌روزرسانی هفتگی: اگر فایل همراه از دادهٔ ذخیره‌شده تازه‌تر باشد، پس از نمایش داده
+      // (بدون معطل کردن بوت) در پس‌زمینه جایگزین می‌شود. رندر اول هرگز منتظر شبکه نمی‌ماند.
+      void autoUpdate(stored.meta, signal);
       if (migration.changed || state.repaired) {
         const saved = await saveData(stored);
         const parts = [
@@ -176,7 +202,7 @@ export default function App() {
     } catch {
       if (alive()) { loadDemo(); flash('فایل همراه برنامه قابل خواندن نبود؛ دادهٔ نمونه نمایش داده شد.'); }
     }
-  }, [ingest, loadDemo, flash]);
+  }, [autoUpdate, ingest, loadDemo, flash]);
 
   // ---------- boot ----------
   useEffect(() => {
@@ -243,7 +269,8 @@ export default function App() {
       const buf = await f.arrayBuffer();
       const ok = await ingest(buf, f.name, 'upload');
       if (ok) {
-        setModal('report');
+        // آپدیت تابعی: اگر کاربر حین پردازش پنجره را بسته، دوباره باز نشود
+        setModal((m) => (m === null ? m : 'report'));
       }
     } catch (err) {
       setStatus('خطا در خواندن فایل: ' + (err as Error).message);
@@ -265,7 +292,8 @@ export default function App() {
       if (controller.signal.aborted) { setStatus('دریافت آنلاین لغو شد.'); return; }
       if (r) {
         const ok = await ingest(r.buf, r.name, 'remote');
-        if (ok) setModal('report');
+        // آپدیت تابعی: اگر کاربر حین پردازش پنجره را بسته، دوباره باز نشود
+        if (ok) setModal((m) => (m === null ? m : 'report'));
       } else {
         setStatus('دریافت آنلاین ناموفق بود (محدودیت CORS، شبکه یا فایل نامعتبر). فایل را دانلود و بارگذاری کنید.');
       }
@@ -277,21 +305,18 @@ export default function App() {
       setStatus('خطا در دریافت فایل: ' + (error as Error).message);
       flash('دریافت فایل ناموفق بود');
     } finally {
-      // اگر کاربر لغو کرده باشد، cancelImport همین حالا وضعیت را پاک کرده است
-      if (importAbort.current === controller) {
-        importAbort.current = null;
-        setRemoteBusy(false);
-        setBusy(false);
-        operation.current = false;
-      }
+      // این جریان مالک قفل عملیات است؛ چه لغو شده باشد چه نه، اینجا آزادش می‌کند تا
+      // بستن پنجره هرگز قفل را زودتر از پایان کار نتواند باز کند (دو واردسازی هم‌زمان ممکن نشود)
+      if (importAbort.current === controller) importAbort.current = null;
+      setRemoteBusy(false);
+      setBusy(false);
+      operation.current = false;
     }
   };
 
-  /** لغو دریافت آنلاین (دکمهٔ داخل پنجره یا بستن پنجره) */
+  /** لغو دریافت آنلاین (دکمهٔ داخل پنجره یا بستن پنجره)؛ فقط درخواست شبکه قطع و نشانگرها پاک می‌شوند */
   const cancelImport = useCallback(() => {
     importAbort.current?.abort();
-    importAbort.current = null;
-    operation.current = false;
     setRemoteBusy(false);
     setBusy(false);
   }, []);
@@ -447,7 +472,12 @@ export default function App() {
 
   const searchInput = (ref: React.RefObject<HTMLInputElement | null>, placeholder: string, onCommit: boolean) => (
     <form
-      onSubmit={(e) => { e.preventDefault(); if (onCommit) scrollToResults(); }}
+      onSubmit={(e) => {
+        e.preventDefault();
+        // بدون این، عبارت تایپ‌شده هرگز در «جستجوهای اخیر» ثبت نمی‌شد
+        runSearch(filters.q);
+        if (onCommit) scrollToResults();
+      }}
       className="relative w-full"
       role="search"
     >
@@ -1095,13 +1125,14 @@ export default function App() {
           tab={modal}
           report={report}
           meta={meta}
+          centerCount={centers.length}
           busy={busy || booting}
           status={status}
           onFile={handleFile}
           onRemote={handleRemote}
           onReset={handleReset}
           onCancel={remoteBusy ? cancelImport : undefined}
-          onClose={() => { if (busy) cancelImport(); setModal(null); }}
+          onClose={() => { if (remoteBusy) cancelImport(); setModal(null); }}
         />
       )}
 

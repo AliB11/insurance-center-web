@@ -12,7 +12,7 @@ import { validStoredData, normalizeStoredData, loadList, type StoredData } from 
 import { detectProvince, exactProvince, explicitProvince } from '../src/lib/geo';
 import { canonicalCity, citiesInScope, detectScopeCity, TEHRAN_SCOPE } from '../src/lib/scope';
 import { DATA_SCHEMA, migrateStored } from '../src/lib/migrate';
-import { tryRemote, tryLocal, remoteUrl } from '../src/lib/loader';
+import { tryRemote, tryLocal, remoteUrl, parseManifest, isManifestNewer, fetchManifest } from '../src/lib/loader';
 import { parsePhones, highlightRanges, phonesFromText, compactTerm } from '../src/lib/text';
 import { applyFilters, EMPTY_FILTERS, matchesTerm, tokensOf } from '../src/lib/search';
 
@@ -143,6 +143,50 @@ check('oversized sparse sheet rejected before expansion', () => {
 });
 check('unsafe remote schemes and embedded credentials rejected', () => {
   for (const input of ['javascript:alert(1)', 'file:///data.xlsx', 'https://user:pass@example.com/a.xlsx']) assert.throws(() => remoteUrl(input));
+});
+
+check('descriptive name header is promoted to the name column (real sphbank file shape)', () => {
+  // هدر واقعی فایل مراکز: «بیمارستان و مرکز جراحی (بستری)»/« داروخانه» با الگوی دقیق نام match نمی‌شود
+  const result = parseWorkbook(workbook([
+    ['رديف', 'بیمارستان و مرکز جراحی (بستری)', 'کد', 'آدرس', 'شماره تلفن'],
+    ['1', 'اقبال', '1000', 'خیابان آزادی، نبش خیابان میمنت', '66001126-9'],
+    ['2', 'لاله', '1001', 'خیابان ولیعصر', '88775799-88789039'],
+  ]));
+  assert.deepEqual(result.centers.map((c) => c.name), ['اقبال', 'لاله']);
+  assert.ok(!result.report[0].mapping.some((m) => m.field === 'name' && m.header === 'کد'), 'code column never becomes the name');
+  assert.deepEqual(result.centers.map((c) => c.phones.map((p) => p.tel)), [['02166001126'], ['02188775799', '02188789039']]);
+});
+
+console.log('\n--- به‌روزرسانی خودکار هفتگی (manifest فایل همراه) ---');
+const manifestFixture = {
+  updatedAt: '2026-10-24T06:00:00.000Z',
+  publishedAt: '2026-09-26T04:52:01.000Z',
+  sha256: 'a'.repeat(64),
+  source: 'https://sphbank.ir/Upload/Modules/Contents/asset55/1405.07.01مراکز درمانی.xlsx',
+  fileName: '1405.07.01مراکز درمانی.xlsx',
+};
+check('manifest: strict parsing accepts the real shape and rejects tampering', () => {
+  const parsed = parseManifest(manifestFixture);
+  assert.ok(parsed);
+  assert.equal(parsed!.sha256, 'a'.repeat(64));
+  assert.equal(parsed!.publishedAt, manifestFixture.publishedAt);
+  assert.equal(parseManifest({ ...manifestFixture, sha256: 'nothex' }), null);
+  assert.equal(parseManifest({ ...manifestFixture, sha256: 'A'.repeat(63) }), null);
+  assert.equal(parseManifest({ ...manifestFixture, updatedAt: 'yesterday' }), null);
+  assert.equal(parseManifest({ ...manifestFixture, publishedAt: 'nonsense' }), null);
+  assert.equal(parseManifest(null), null);
+  assert.equal(parseManifest('<html>gateway error</html>'), null);
+  assert.equal(parseManifest({ ...manifestFixture, fileName: '' })!.fileName, 'centers.xlsx', 'fallback file name');
+});
+check('manifest freshness: published date decides, loadedAt ties go to stored data', () => {
+  const manifest = parseManifest(manifestFixture)!;
+  const published = Date.parse(manifestFixture.publishedAt!);
+  assert.equal(isManifestNewer(manifest, { loadedAt: published - 1 }), true, 'stored data predates the file');
+  assert.equal(isManifestNewer(manifest, { loadedAt: published }), false, 'same instant is not newer');
+  assert.equal(isManifestNewer(manifest, { loadedAt: published + 1000 }), false);
+  assert.equal(isManifestNewer(manifest, null), true, 'no stored data yet');
+  assert.equal(isManifestNewer({ ...manifest, publishedAt: null }, { loadedAt: Date.parse(manifestFixture.updatedAt) }), false, 'falls back to updatedAt');
+  assert.equal(isManifestNewer({ ...manifest, publishedAt: null, updatedAt: 'bad' }, null), false, 'unreadable dates never update');
 });
 
 console.log('\n--- دامنهٔ داده: همهٔ مراکز در استان تهران ---');
@@ -628,6 +672,19 @@ async function networkTests() {
     cancel.abort();
     await assert.rejects(() => pending, /^Error: ABORT$/);
     console.log('PASS  geocode timeout is explained; user cancel stays silent'); count++;
+
+    // manifest فایل همراه: JSON معتبر پذیرفته، ۴۰۴/HTML/شبکهٔ قطع بی‌صدا نادیده گرفته می‌شود
+    globalThis.fetch = async () => new Response(JSON.stringify(manifestFixture), { headers: { 'content-type': 'application/json' } });
+    const bundledManifest = await fetchManifest();
+    assert.ok(bundledManifest && /^[0-9a-f]{64}$/.test(bundledManifest.sha256));
+    assert.equal(bundledManifest!.fileName, manifestFixture.fileName);
+    globalThis.fetch = async () => new Response('not found', { status: 404 });
+    assert.equal(await fetchManifest(), null);
+    globalThis.fetch = async () => new Response('<html><body>gateway error</body></html>');
+    assert.equal(await fetchManifest(), null, 'HTML error page is never parsed as a manifest');
+    globalThis.fetch = async () => { throw new Error('offline'); };
+    assert.equal(await fetchManifest(), null);
+    console.log('PASS  bundled manifest fetch: valid JSON accepted, 404/HTML/offline silently ignored'); count++;
     geoConfig.timeoutMs = 12_000;
   } finally { globalThis.fetch = original; }
   console.log(`\n${count} regression checks passed`);

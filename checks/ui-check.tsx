@@ -186,6 +186,33 @@ async function main() {
       && (favLists[0][1] as string[]).length === 1,
   );
 
+  // ----- تعامل ۸: ارسال فرم جستجو باید عبارت را در «جستجوهای اخیر» ذخیره کند -----
+  const searchForm = dom.window.document.querySelector('form[role="search"]') as HTMLFormElement;
+  const searchField = searchForm.querySelector('input') as HTMLInputElement;
+  await act(async () => {
+    setter.call(searchField, 'آزمایشگاه تجریش');
+    searchField.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  });
+  await act(async () => { searchForm.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true })); });
+  const recents: unknown = JSON.parse(dom.window.localStorage.getItem('sepah-recent') || 'null');
+  must('ارسال فرم جستجو عبارت را در «جستجوهای اخیر» ذخیره کرد', Array.isArray(recents) && (recents as string[]).includes('آزمایشگاه تجریش'));
+  must('نوار «جستجوهای اخیر» ظاهر شد', text().includes('جستجوهای اخیر'));
+
+  // ----- تعامل ۹: پنجرهٔ داده — شمارش مراکز برای دادهٔ نمونه (نه «۰ مرکز») -----
+  const uploadBtn = Array.from(dom.window.document.querySelectorAll('button'))
+    .find((b) => (b.textContent || '').includes('بارگذاری فایل')) as HTMLButtonElement;
+  await act(async () => { uploadBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  const dataDlg = dom.window.document.querySelector('[role="dialog"][aria-modal="true"]') as HTMLElement;
+  must('پنجرهٔ داده باز شد', !!dataDlg);
+  must(
+    'شمارش مراکز در پنجرهٔ داده درست است: ' + toFa(demoCenters().length) + ' مرکز',
+    (dataDlg.textContent || '').includes(`${toFa(demoCenters().length)} مرکز — `),
+  );
+  await act(async () => {
+    dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+  must('پنجرهٔ داده با Escape بسته شد', count('[role="dialog"][aria-modal="true"]') === 0);
+
   await act(async () => { root.unmount(); });
   must('unmount بدون خطا', true);
 }

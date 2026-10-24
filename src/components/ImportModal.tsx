@@ -12,6 +12,8 @@ interface Props {
   meta: Meta | null;
   busy: boolean;
   status: string;
+  /** شمارش زندهٔ مراکز فعلی؛ برای دادهٔ نمونه که گزارش اکسلی ندارد */
+  centerCount: number;
   onFile: (f: File) => void;
   onRemote: (url: string) => void;
   onReset: () => void;
@@ -30,13 +32,14 @@ const FIELD_COLOR: Record<string, string> = {
   extra: 'bg-slate-100 text-slate-600',
 };
 
-export function ImportModal({ tab: requested, report, meta, busy, status, onFile, onRemote, onReset, onCancel, onClose }: Props) {
+export function ImportModal({ tab: requested, report, meta, busy, status, centerCount, onFile, onRemote, onReset, onCancel, onClose }: Props) {
   const [tab, setTab] = useState(requested);
   const [drag, setDrag] = useState(false);
   const [url, setUrl] = useState('https://sphbank.ir/hr');
   const [confirmReset, setConfirmReset] = useState(false);
   const input = useRef<HTMLInputElement>(null);
-  const total = report.reduce((a, r) => a + r.imported, 0);
+  // برای دادهٔ نمونه گزارش اکسلی وجود ندارد؛ شمارش زندهٔ مراکز نمایش داده شود، نه «۰ مرکز»
+  const total = report.length ? report.reduce((a, r) => a + r.imported, 0) : centerCount;
   const rawRows = report.reduce((a, r) => a + r.rows, 0);
 
   // اگر کاربر از نوار بالا مستقیماً «گزارش» را باز کند، تب داخلی هم باید عوض شود
@@ -162,9 +165,11 @@ export function ImportModal({ tab: requested, report, meta, busy, status, onFile
               <ul className="list-disc space-y-1 pr-5">
                 <li>داده‌ها فقط در مرورگر همین دستگاه ذخیره می‌شوند (بدون ارسال فایل به سرور؛ در حافظهٔ محلی مرورگر).</li>
                 <li>
-                  برای انتشار دائمی برای همهٔ کاربران، فایل را با نام{' '}
+                  گردش‌کار هفتگی مخزن، فایل مراکز را از{' '}
+                  <code dir="ltr" className="rounded bg-white px-1.5 text-xs">sphbank.ir/hr</code> دریافت و با نام{' '}
                   <code dir="ltr" className="rounded bg-white px-1.5 text-xs">centers.xlsx</code> در مسیر{' '}
-                  <code dir="ltr" className="rounded bg-white px-1.5 text-xs">public/data/</code> قرار دهید تا هنگام ورود خودکار خوانده شود.
+                  <code dir="ltr" className="rounded bg-white px-1.5 text-xs">public/data/</code> نگه می‌دارد؛ برنامه در بوتِ بعدی، دادهٔ
+                  ذخیره‌شدهٔ قدیمی‌تر را خودکار با آن جایگزین می‌کند. قرار دادن دستی فایل در همین مسیر هم معتبر است.
                 </li>
                 <li>هدر ستون‌ها (نام، استان، شهر، آدرس، تلفن، …)، سلول‌های ادغام‌شده، هدرهای تکراری و ردیف‌های عنوان به‌صورت هوشمند شناسایی می‌شوند.</li>
                 {DATA_SCOPE && (

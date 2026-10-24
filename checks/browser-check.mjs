@@ -13,6 +13,10 @@ let checks = 0;
 const pass = (label) => { checks++; console.log('PASS ', label); };
 const context = await browser.newContext({ viewport: { width: 1365, height: 900 }, reducedMotion: 'reduce', geolocation: { latitude: 35.8, longitude: 51.5 }, permissions: ['geolocation'] });
 const page = await context.newPage();
+// فایل همراهِ واقعی (پس از اولین اجرای گردش‌کار هفتگی در public/data/) نباید بوتِ
+// این سناریوها را عوض کند؛ استقرار «بدون فایل همراه» شبیه‌سازی می‌شود تا بوت قطعی
+// به دادهٔ نمونه برسد. سناریوی به‌روزرسانی خودکار جداگانه و با پاسخ ساختگی آزموده می‌شود.
+await context.route('**/data/**', (route) => route.abort());
 const errors = [];
 page.on('pageerror', (error) => errors.push(error.message));
 const dataset = XLSX.utils.book_new();
@@ -219,6 +223,8 @@ try {
   const legacyContext = await browser.newContext();
   const legacyPage = await legacyContext.newPage();
   legacyPage.on('pageerror', (error) => errors.push(error.message));
+  // دادهٔ قدیمیِ دست‌نویس باید همین‌طور که هست مهاجرت دیده شود؛ فایل همراه نباید وارد شود
+  await legacyPage.route('**/data/**', (route) => route.abort());
   await legacyPage.goto(base);
   await legacyPage.locator('article').first().waitFor();
   const legacyCenter = (id, name, province, address, phone, tel) => ({
@@ -269,6 +275,7 @@ try {
   // دادهٔ ذخیره‌شده‌ای که هیچ مرکز سالمی ندارد نباید بی‌صدا به دادهٔ نمونه تبدیل شود
   const brokenContext = await browser.newContext();
   const brokenPage = await brokenContext.newPage();
+  await brokenPage.route('**/data/**', (route) => route.abort());
   await brokenPage.goto(base);
   await brokenPage.locator('article').first().waitFor();
   await brokenPage.evaluate(() => new Promise((resolve, reject) => {
@@ -295,6 +302,55 @@ try {
   assert.equal(preserved, 2);
   pass('an unreadable stored dataset is reported and preserved, not silently replaced');
   await brokenContext.close();
+
+  // به‌روزرسانی خودکار هفتگی: دادهٔ ذخیره‌شدهٔ قدیمی‌تر از manifest فایل همراه، در پس‌زمینه جایگزین می‌شود
+  const autoContext = await browser.newContext();
+  const autoPage = await autoContext.newPage();
+  autoPage.on('pageerror', (error) => errors.push(error.message));
+  await autoPage.goto(base);
+  await autoPage.locator('article').first().waitFor();
+  await autoPage.evaluate(() => new Promise((resolve, reject) => {
+    const request = indexedDB.open('sepah-insurance-centers', 1);
+    request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains('kv')) request.result.createObjectStore('kv'); };
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const tx = request.result.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put({
+        centers: [{
+          id: 0, name: 'مرکز قدیمی به‌روزرسانی', category: 'مراکز', sheet: 'مراکز', province: 'تهران', city: 'تهران',
+          address: 'خیابان قدیم', phones: [], kind: '', service: '', discount: '', desc: '', extra: {},
+          search: 'مرکز قدیمی به‌روزرسانی', nameN: 'مرکز قدیمی به‌روزرسانی', locN: 'تهران تهران', catN: 'مراکز',
+        }],
+        report: [],
+        meta: { fileName: 'old.xlsx', source: 'upload', loadedAt: 1, size: 10 },
+      }, 'dataset');
+      tx.oncomplete = () => { request.result.close(); resolve(); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }));
+  const publishedNow = new Date().toISOString();
+  await autoPage.route('**/data/centers.json', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ updatedAt: publishedNow, publishedAt: publishedNow, sha256: 'b'.repeat(64), source: 'https://sphbank.ir/hr', fileName: 'تازه-مراکز.xlsx' }),
+  }));
+  await autoPage.route('**/data/centers.xlsx', (route) => route.fulfill({ status: 200, body: Buffer.from(XLSX.write(dataset, { type: 'buffer', bookType: 'xlsx' })) }));
+  await autoPage.reload();
+  await autoPage.waitForFunction(() => document.querySelectorAll('article').length === 2);
+  await autoPage.getByText('فهرست مراکز از منبع اصلی به‌روزرسانی شد.').waitFor();
+  pass('stored data older than the bundled manifest is auto-refreshed in the background');
+  const autoMeta = await autoPage.evaluate(() => new Promise((resolve) => {
+    const request = indexedDB.open('sepah-insurance-centers', 1);
+    request.onsuccess = () => {
+      const get = request.result.transaction('kv').objectStore('kv').get('dataset');
+      get.onsuccess = () => { resolve(get.result?.meta); request.result.close(); };
+    };
+  }));
+  assert.equal(autoMeta?.fileName, 'تازه-مراکز.xlsx');
+  assert.equal(autoMeta?.source, 'remote');
+  pass('auto-update re-saves the refreshed dataset with the manifest file name');
+  await autoContext.close();
+
   assert.deepEqual(errors, []);
   console.log(`\n${checks} browser checks passed (${base})`);
 } finally { await browser.close(); }

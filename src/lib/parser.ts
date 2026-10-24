@@ -200,6 +200,27 @@ function buildPlan(headers: string[], rows: string[][], start: number): ColPlan 
     fields.push(f);
     labels.push(h || `ستون ${XLSX.utils.encode_col(i)}`);
   });
+  // هدر توصیفیِ نام («بیمارستان و مرکز جراحی (بستری)»، « داروخانه») با الگوهای دقیق
+  // نام match نمی‌شود و ستون به extra می‌رود؛ نام آن‌وقت از fallback می‌آید و در
+  // جزئیات هم تکرار می‌شود. وقتی هیچ ستونی «نام» نشده، اولین ستون extra که هدرش
+  // کد/ردیف نیست و مقدارهایش متنیِ کوتاه‌اند، نام حساب می‌شود (ساختار فایل واقعی).
+  if (!fields.includes('name')) {
+    for (let i = 0; i < fields.length; i++) {
+      if (fields[i] !== 'extra') continue;
+      const h = norm(headers[i] ?? '');
+      if (/کد|ردیف|شماره/.test(h)) continue;
+      const vals = rows.slice(start).map((r) => r[i]).filter(Boolean);
+      if (!vals.length) continue;
+      const textual = vals.filter((v) => {
+        const n = toLatinDigits(v).trim();
+        return n.length >= 2 && n.length <= 60 && !/^[\d\s.\-/]+$/.test(n);
+      }).length / vals.length;
+      if (textual > 0.8) {
+        fields[i] = 'name';
+        break;
+      }
+    }
+  }
   return { fields, labels };
 }
 
