@@ -152,9 +152,15 @@ try {
   assert.equal(await dialog.getByRole('button', { name: 'دریافت', exact: true }).isEnabled(), true);
   assert.equal(await page.locator('article').count(), 2); pass('corrupt remote workbook does not erase data or lock import');
 
-  // دریافت آنلاین باید قابل لغو باشد و پاسخ دیررس نباید داده را عوض کند
+  // دریافت آنلاین باید قابل لغو باشد و پاسخ دیررس نباید داده را عوض کند.
+  // پاسخ پشت یک gate نگه داشته می‌شود (نه تأخیر ثابت؛ روی CI کند، فاصلهٔ دو کلیک
+  // می‌توانست از مهلت تأخیر رد شود و پاسخ زودتر از لغو می‌رسید) تا لغو همیشه
+  // در میانهٔ درخواست رخ دهد و نتیجه قطعی باشد.
+  let releaseSlowRoute = () => {};
+  const slowGate = new Promise((resolve) => { releaseSlowRoute = resolve; });
   await page.route('https://example.com/slow.xlsx', async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await slowGate;
+    await new Promise((resolve) => setTimeout(resolve, 250));
     await route.fulfill({ status: 200, body: Buffer.from(XLSX.write(dataset, { type: 'buffer', bookType: 'xlsx' })), headers: { 'access-control-allow-origin': '*' } }).catch(() => {});
   });
   await url.fill('https://example.com/slow.xlsx');
@@ -162,7 +168,8 @@ try {
   await dialog.getByRole('button', { name: 'لغو دریافت' }).waitFor();
   await dialog.getByRole('button', { name: 'لغو دریافت' }).click();
   await dialog.getByRole('status').filter({ hasText: 'لغو شد' }).waitFor();
-  await page.waitForTimeout(3200);
+  releaseSlowRoute(); // پاسخِ دیررسِ پس از لغو هم نباید داده را عوض کند
+  await page.waitForTimeout(600);
   assert.equal(await page.locator('article').count(), 2);
   assert.equal(await dialog.getByRole('button', { name: 'دریافت', exact: true }).isEnabled(), true);
   pass('cancelling a slow remote import restores the dialog and never swaps the data');
